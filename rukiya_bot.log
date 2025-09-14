@@ -1,0 +1,97 @@
+2025-09-14 05:45:16,657 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 05:45:16,658 - __main__ - INFO - AI service initialized
+2025-09-14 05:45:16,659 - __main__ - ERROR - Failed to start bot: no running event loop
+2025-09-14 05:46:11,490 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 05:46:11,498 - __main__ - INFO - AI service initialized
+2025-09-14 05:46:11,499 - discord.client - INFO - logging in using static token
+2025-09-14 05:46:12,911 - __main__ - INFO - Slash commands synced
+2025-09-14 05:46:13,722 - __main__ - ERROR - Failed to start bot: Shard ID None is requesting privileged intents that have not been explicitly enabled in the developer portal. It is recommended to go to https://discord.com/developers/applications/ and explicitly enable the privileged intents within your application's page. If this is not possible, then consider disabling the privileged intents instead.
+2025-09-14 05:48:03,288 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 05:48:03,290 - __main__ - INFO - AI service initialized
+2025-09-14 05:48:03,291 - discord.client - INFO - logging in using static token
+2025-09-14 05:48:04,773 - __main__ - INFO - Slash commands synced
+2025-09-14 05:48:05,495 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: a8106649bf1e3acef1b50c8e7d906676).
+2025-09-14 05:48:07,500 - __main__ - INFO - ✅ Rukiya#6853 is ready!
+2025-09-14 06:01:04,815 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 06:01:04,828 - services.ai_service - INFO - AI service initialized
+2025-09-14 06:01:04,830 - __main__ - INFO - Bot initialized successfully
+2025-09-14 06:01:04,832 - discord.client - INFO - logging in using static token
+2025-09-14 06:01:05,770 - cogs.youtube_commands - INFO - YouTube Commands cog initialized
+2025-09-14 06:01:05,775 - __main__ - INFO - ✅ Loaded cog: cogs.youtube_commands
+2025-09-14 06:01:05,793 - cogs.admin_commands - INFO - Admin Commands cog initialized
+2025-09-14 06:01:05,799 - __main__ - INFO - ✅ Loaded cog: cogs.admin_commands
+2025-09-14 06:01:05,835 - __main__ - ERROR - ❌ Failed to load cog cogs.utility_commands: Extension 'cogs.utility_commands' raised an error: ModuleNotFoundError: No module named 'psutil'
+2025-09-14 06:01:05,838 - cogs.events - INFO - Events cog initialized
+2025-09-14 06:01:05,838 - __main__ - INFO - ✅ Loaded cog: cogs.events
+2025-09-14 06:01:06,665 - __main__ - INFO - ✅ Synced 8 slash commands
+2025-09-14 06:01:07,492 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: bf418d585927bc0c97c1ae0635ed7b10).
+2025-09-14 06:01:09,513 - __main__ - INFO - 🚀 Rukiya#6853 is online and ready!
+2025-09-14 06:01:09,516 - __main__ - INFO - 📊 Connected to 1 guild(s)
+2025-09-14 06:01:09,517 - cogs.events - INFO - Bot ready event fired
+2025-09-14 06:02:14,770 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 06:02:14,773 - services.ai_service - INFO - AI service initialized
+2025-09-14 06:02:14,773 - __main__ - INFO - Bot initialized successfully
+2025-09-14 06:02:14,773 - discord.client - INFO - logging in using static token
+2025-09-14 06:02:15,619 - cogs.youtube_commands - INFO - YouTube Commands cog initialized
+2025-09-14 06:02:15,619 - __main__ - INFO - ✅ Loaded cog: cogs.youtube_commands
+2025-09-14 06:02:15,621 - cogs.admin_commands - INFO - Admin Commands cog initialized
+2025-09-14 06:02:15,621 - __main__ - INFO - ✅ Loaded cog: cogs.admin_commands
+2025-09-14 06:02:15,709 - __main__ - ERROR - ❌ Failed to load cog cogs.utility_commands: Extension 'cogs.utility_commands' raised an error: TypeError: Commands or listeners must not start with cog_ or bot_ (in method UtilityCommands.bot_info)
+2025-09-14 06:02:15,727 - cogs.events - INFO - Events cog initialized
+2025-09-14 06:02:15,731 - __main__ - INFO - ✅ Loaded cog: cogs.events
+2025-09-14 06:02:16,231 - __main__ - INFO - ✅ Synced 8 slash commands
+2025-09-14 06:02:16,981 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: b0105dbc2c20e1019548bae47d12fa1b).
+2025-09-14 06:02:18,991 - __main__ - INFO - 🚀 Rukiya#6853 is online and ready!
+2025-09-14 06:02:18,993 - __main__ - INFO - 📊 Connected to 1 guild(s)
+2025-09-14 06:02:18,994 - cogs.events - INFO - Bot ready event fired
+2025-09-14 06:03:04,152 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 06:03:04,163 - services.ai_service - INFO - AI service initialized
+2025-09-14 06:03:04,165 - __main__ - INFO - Bot initialized successfully
+2025-09-14 06:03:04,167 - discord.client - INFO - logging in using static token
+2025-09-14 06:03:05,109 - cogs.youtube_commands - INFO - YouTube Commands cog initialized
+2025-09-14 06:03:05,110 - __main__ - INFO - ✅ Loaded cog: cogs.youtube_commands
+2025-09-14 06:03:05,112 - cogs.admin_commands - INFO - Admin Commands cog initialized
+2025-09-14 06:03:05,112 - __main__ - INFO - ✅ Loaded cog: cogs.admin_commands
+2025-09-14 06:03:05,147 - __main__ - ERROR - ❌ Failed to load cog cogs.utility_commands: Extension 'cogs.utility_commands' raised an error: TypeError: Commands or listeners must not start with cog_ or bot_ (in method UtilityCommands.bot_info)
+2025-09-14 06:03:05,149 - cogs.events - INFO - Events cog initialized
+2025-09-14 06:03:05,149 - __main__ - INFO - ✅ Loaded cog: cogs.events
+2025-09-14 06:03:05,775 - __main__ - INFO - ✅ Synced 8 slash commands
+2025-09-14 06:03:06,532 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: fcd91be9a37b59787d5ad71aac430037).
+2025-09-14 06:03:08,580 - __main__ - INFO - 🚀 Rukiya#6853 is online and ready!
+2025-09-14 06:03:08,583 - __main__ - INFO - 📊 Connected to 1 guild(s)
+2025-09-14 06:03:08,591 - cogs.events - INFO - Bot ready event fired
+2025-09-14 06:05:17,517 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 06:05:17,530 - services.ai_service - INFO - AI service initialized
+2025-09-14 06:05:17,533 - __main__ - INFO - Bot initialized successfully
+2025-09-14 06:05:17,534 - discord.client - INFO - logging in using static token
+2025-09-14 06:05:18,379 - cogs.youtube_commands - INFO - YouTube Commands cog initialized
+2025-09-14 06:05:18,380 - __main__ - INFO - ✅ Loaded cog: cogs.youtube_commands
+2025-09-14 06:05:18,383 - cogs.admin_commands - INFO - Admin Commands cog initialized
+2025-09-14 06:05:18,384 - __main__ - INFO - ✅ Loaded cog: cogs.admin_commands
+2025-09-14 06:05:18,403 - __main__ - ERROR - ❌ Failed to load cog cogs.utility_commands: Extension 'cogs.utility_commands' raised an error: TypeError: Commands or listeners must not start with cog_ or bot_ (in method UtilityCommands.bot_info)
+2025-09-14 06:05:18,405 - cogs.events - INFO - Events cog initialized
+2025-09-14 06:05:18,407 - __main__ - INFO - ✅ Loaded cog: cogs.events
+2025-09-14 06:05:18,956 - __main__ - INFO - ✅ Synced 8 slash commands
+2025-09-14 06:05:19,858 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: eb0db80ebf9d7bff9e3ce6a22a09ff36).
+2025-09-14 06:05:21,875 - __main__ - INFO - 🚀 Rukiya#6853 is online and ready!
+2025-09-14 06:05:21,879 - __main__ - INFO - 📊 Connected to 1 guild(s)
+2025-09-14 06:05:21,900 - cogs.events - INFO - Bot ready event fired
+2025-09-14 06:06:42,767 - cogs.events - INFO - Joined new guild: game 4 (ID: 1303327001125326910)
+2025-09-14 06:06:43,258 - cogs.events - INFO - Sent welcome message to game 4
+2025-09-14 06:09:16,352 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-09-14 06:09:16,354 - services.ai_service - INFO - AI service initialized
+2025-09-14 06:09:16,354 - __main__ - INFO - Bot initialized successfully
+2025-09-14 06:09:16,355 - discord.client - INFO - logging in using static token
+2025-09-14 06:09:17,228 - cogs.youtube_commands - INFO - YouTube Commands cog initialized
+2025-09-14 06:09:17,240 - __main__ - INFO - ✅ Loaded cog: cogs.youtube_commands
+2025-09-14 06:09:17,248 - cogs.admin_commands - INFO - Admin Commands cog initialized
+2025-09-14 06:09:17,251 - __main__ - INFO - ✅ Loaded cog: cogs.admin_commands
+2025-09-14 06:09:17,294 - __main__ - ERROR - ❌ Failed to load cog cogs.utility_commands: Extension 'cogs.utility_commands' raised an error: TypeError: Commands or listeners must not start with cog_ or bot_ (in method UtilityCommands.bot_info)
+2025-09-14 06:09:17,306 - cogs.events - INFO - Events cog initialized
+2025-09-14 06:09:17,310 - __main__ - INFO - ✅ Loaded cog: cogs.events
+2025-09-14 06:09:17,796 - __main__ - INFO - ✅ Synced 8 slash commands
+2025-09-14 06:09:18,638 - discord.gateway - INFO - Shard ID None has connected to Gateway (Session ID: 75364d859f093d3797bd844bf60186a5).
+2025-09-14 06:09:20,663 - __main__ - INFO - 🚀 Rukiya#6853 is online and ready!
+2025-09-14 06:09:20,666 - __main__ - INFO - 📊 Connected to 2 guild(s)
+2025-09-14 06:09:20,668 - cogs.events - INFO - Bot ready event fired
+2025-09-14 06:12:22,617 - services.youtube_service - ERROR - YouTube authentication failed: ('invalid_grant: Token has been expired or revoked.', {'error': 'invalid_grant', 'error_description': 'Token has been expired or revoked.'})

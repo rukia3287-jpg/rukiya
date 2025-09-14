@@ -1,0 +1,23 @@
+services:
+- type: web
+  name: rukiya-bot
+  env: python
+  region: oregon
+  plan: free
+  buildCommand: pip install -r requirements.txt
+  startCommand: python main.py
+  healthCheckPath: /health
+  envVars:
+    - key: DISCORD_TOKEN
+      sync: false
+    - key: GEMINI_API_KEY
+      sync: false
+    - key: CLIENT_SECRET_JSON
+      sync: false
+    - key: TOKEN_JSON
+      sync: false
+    - key: PYTHON_VERSION
+      value: 3.11.5
+  scaling:
+    minInstances: 1
+    maxInstances: 1
