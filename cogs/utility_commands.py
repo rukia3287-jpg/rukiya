@@ -1,248 +1,179 @@
-import logging
 import discord
 from discord.ext import commands
-from discord import app_commands
-import time
 import psutil
-import os
-
-logger = logging.getLogger(__name__)
+import platform
+from datetime import datetime
 
 class UtilityCommands(commands.Cog):
-    """Cog for utility commands"""
-
+    """Utility commands for the bot"""
+    
     def __init__(self, bot):
         self.bot = bot
-        self.start_time = time.time()
-        logger.info("Utility Commands cog initialized")
 
-    @app_commands.command(name="ping", description="Check bot latency")
-    async def ping(self, interaction: discord.Interaction):
+    @commands.command(name="botinfo", aliases=["info"])
+    async def system_info(self, ctx):
+        """Display bot information and system stats"""
+        try:
+            # Get system info
+            memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=1)
+            
+            # Get bot uptime
+            uptime = datetime.now() - self.bot.start_time if hasattr(self.bot, 'start_time') else None
+            
+            embed = discord.Embed(
+                title="🤖 Bot Information",
+                color=discord.Color.blue(),
+                timestamp=datetime.utcnow()
+            )
+            
+            # Bot stats
+            embed.add_field(
+                name="📊 Bot Stats",
+                value=f"Servers: {len(self.bot.guilds)}\n"
+                      f"Users: {len(self.bot.users)}\n"
+                      f"Commands: {len(self.bot.commands)}",
+                inline=True
+            )
+            
+            # System stats
+            embed.add_field(
+                name="💻 System",
+                value=f"OS: {platform.system()}\n"
+                      f"Python: {platform.python_version()}\n"
+                      f"Discord.py: {discord.__version__}",
+                inline=True
+            )
+            
+            # Performance
+            embed.add_field(
+                name="⚡ Performance",
+                value=f"CPU: {cpu_percent}%\n"
+                      f"Memory: {memory.percent}%\n"
+                      f"Latency: {round(self.bot.latency * 1000)}ms",
+                inline=True
+            )
+            
+            if uptime:
+                embed.add_field(
+                    name="⏰ Uptime",
+                    value=f"{uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m",
+                    inline=True
+                )
+            
+            embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"Error getting bot info: {str(e)}")
+
+    @commands.command(name="ping")
+    async def latency_check(self, ctx):
         """Check bot latency"""
-        start_time = time.time()
-        await interaction.response.defer()
-        end_time = time.time()
-
-        # Calculate latencies
-        api_latency = (end_time - start_time) * 1000
-        websocket_latency = self.bot.latency * 1000
-
+        latency = round(self.bot.latency * 1000)
+        
+        # Determine latency quality
+        if latency < 100:
+            emoji = "🟢"
+            quality = "Excellent"
+        elif latency < 200:
+            emoji = "🟡"
+            quality = "Good"
+        elif latency < 300:
+            emoji = "🟠"
+            quality = "Fair"
+        else:
+            emoji = "🔴"
+            quality = "Poor"
+        
         embed = discord.Embed(
-            title="🏓 Pong!",
+            title=f"{emoji} Pong!",
+            description=f"Latency: **{latency}ms** ({quality})",
+            color=discord.Color.green() if latency < 100 else discord.Color.yellow()
+        )
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name="servers", aliases=["guilds"])
+    @commands.is_owner()
+    async def server_list(self, ctx):
+        """List all servers the bot is in (Owner only)"""
+        if not self.bot.guilds:
+            await ctx.send("Not connected to any servers.")
+            return
+        
+        embed = discord.Embed(
+            title="📋 Server List",
+            color=discord.Color.blue(),
+            timestamp=datetime.utcnow()
+        )
+        
+        server_info = []
+        for guild in self.bot.guilds[:10]:  # Limit to first 10 servers
+            member_count = guild.member_count or 0
+            server_info.append(f"**{guild.name}** ({member_count} members)")
+        
+        if len(self.bot.guilds) > 10:
+            server_info.append(f"... and {len(self.bot.guilds) - 10} more servers")
+        
+        embed.description = "\n".join(server_info)
+        embed.set_footer(text=f"Total: {len(self.bot.guilds)} servers")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name="uptime")
+    async def show_uptime(self, ctx):
+        """Show bot uptime"""
+        if not hasattr(self.bot, 'start_time'):
+            await ctx.send("Uptime tracking not available.")
+            return
+        
+        uptime = datetime.now() - self.bot.start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        embed = discord.Embed(
+            title="⏰ Bot Uptime",
+            description=f"**{days}** days, **{hours}** hours, **{minutes}** minutes, **{seconds}** seconds",
             color=discord.Color.green()
         )
-        embed.add_field(
-            name="API Latency", 
-            value=f"{api_latency:.2f}ms", 
-            inline=True
-        )
-        embed.add_field(
-            name="WebSocket Latency", 
-            value=f"{websocket_latency:.2f}ms", 
-            inline=True
-        )
+        
+        embed.set_footer(text=f"Started at {self.bot.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        await ctx.send(embed=embed)
 
-        # Add status indicator
-        if websocket_latency < 100:
-            embed.add_field(name="Status", value="🟢 Excellent", inline=True)
-        elif websocket_latency < 200:
-            embed.add_field(name="Status", value="🟡 Good", inline=True)
-        else:
-            embed.add_field(name="Status", value="🔴 Poor", inline=True)
-
-        await interaction.followup.send(embed=embed)
-
-    @app_commands.command(name="uptime", description="Check bot uptime")
-    async def uptime(self, interaction: discord.Interaction):
-        """Check bot uptime"""
-        uptime_seconds = int(time.time() - self.start_time)
-
-        # Calculate time components
-        days, remainder = divmod(uptime_seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        # Format uptime string
-        uptime_parts = []
-        if days > 0:
-            uptime_parts.append(f"{days}d")
-        if hours > 0:
-            uptime_parts.append(f"{hours}h")
-        if minutes > 0:
-            uptime_parts.append(f"{minutes}m")
-        uptime_parts.append(f"{seconds}s")
-
-        uptime_str = " ".join(uptime_parts)
-
-        embed = discord.Embed(
-            title="⏱️ Bot Uptime",
-            description=f"**{uptime_str}**",
-            color=discord.Color.blue()
-        )
-        embed.add_field(
-            name="Started", 
-            value=f"<t:{int(self.start_time)}:R>", 
-            inline=True
-        )
-        embed.add_field(
-            name="Total Seconds", 
-            value=f"{uptime_seconds:,}", 
-            inline=True
-        )
-
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="info", description="Get bot information")
-    async def bot_info(self, interaction: discord.Interaction):
-        """Get bot information"""
-        # Get system info
-        process = psutil.Process(os.getpid())
-        memory_usage = process.memory_info().rss / 1024 / 1024  # MB
-        cpu_usage = process.cpu_percent()
-
-        embed = discord.Embed(
-            title="🤖 Rukiya Bot Information",
-            color=discord.Color.purple()
-        )
-
-        # Bot stats
-        embed.add_field(
-            name="📊 Statistics", 
-            value=(
-                f"**Guilds:** {len(self.bot.guilds)}\n"
-                f"**Users:** {len(self.bot.users)}\n"
-                f"**Commands:** {len(self.bot.tree.get_commands())}"
-            ), 
-            inline=True
-        )
-
-        # System stats
-        embed.add_field(
-            name="💻 System", 
-            value=(
-                f"**Memory:** {memory_usage:.1f} MB\n"
-                f"**CPU:** {cpu_usage}%\n"
-                f"**Python:** {sys.version.split()[0]}"
-            ), 
-            inline=True
-        )
-
-        # Status
-        status = "🟢 Running" if self.bot.chat_monitor.is_running else "🔴 Idle"
-        embed.add_field(
-            name="📡 Status", 
-            value=(
-                f"**Chat Monitor:** {status}\n"
-                f"**AI Service:** {'🟢 Active' if self.bot.ai_service.model else '🔴 Inactive'}\n"
-                f"**YouTube API:** {'🟢 Ready' if self.bot.youtube_service.youtube else '🔴 Not Auth'}"
-            ), 
-            inline=True
-        )
-
-        # Add footer
-        embed.set_footer(
-            text=f"Requested by {interaction.user.display_name}",
-            icon_url=interaction.user.display_avatar.url
-        )
-
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="help", description="Get help information")
-    async def help_command(self, interaction: discord.Interaction):
-        """Get help information"""
-        embed = discord.Embed(
-            title="📚 Rukiya Bot Help",
-            description="Here are all available commands:",
-            color=discord.Color.gold()
-        )
-
-        # YouTube commands
-        embed.add_field(
-            name="🎥 YouTube Commands",
-            value=(
-                "`/start <video_id>` - Start monitoring YouTube chat\n"
-                "`/stop` - Stop chat monitoring\n"
-                "`/status` - Check monitoring status"
-            ),
-            inline=False
-        )
-
-        # Utility commands
-        embed.add_field(
-            name="🛠️ Utility Commands",
-            value=(
-                "`/ping` - Check bot latency\n"
-                "`/uptime` - Check bot uptime\n"
-                "`/info` - Get bot information\n"
-                "`/help` - Show this help message"
-            ),
-            inline=False
-        )
-
-        # Admin commands (only show if user is admin)
-        if interaction.user.guild_permissions.administrator:
-            embed.add_field(
-                name="⚙️ Admin Commands",
-                value=(
-                    "`/reload <cog>` - Reload a cog\n"
-                    "`/config <setting> [value]` - View/modify config\n"
-                    "`/logs [lines]` - Get recent logs\n"
-                    "`/force_stop` - Force stop all operations\n"
-                    "`/test_ai <message>` - Test AI response"
-                ),
-                inline=False
-            )
-
-        # Add usage tips
-        embed.add_field(
-            name="💡 Tips",
-            value=(
-                "• Use `/start` with a YouTube video ID to begin monitoring\n"
-                "• The bot responds to messages containing 'rukiya' or similar triggers\n"
-                "• Check `/status` to see if everything is working correctly"
-            ),
-            inline=False
-        )
-
-        embed.set_footer(text="Rukiya Bot - Your YouTube Chat Assistant")
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="invite", description="Get bot invite link")
-    async def invite(self, interaction: discord.Interaction):
+    @commands.command(name="invite")
+    async def get_invite(self, ctx):
         """Get bot invite link"""
         # Generate invite URL with necessary permissions
         permissions = discord.Permissions(
+            read_messages=True,
             send_messages=True,
             embed_links=True,
             read_message_history=True,
             use_slash_commands=True
         )
-
+        
         invite_url = discord.utils.oauth_url(
-            self.bot.user.id, 
-            permissions=permissions,
-            scopes=['bot', 'applications.commands']
+            self.bot.user.id,
+            permissions=permissions
         )
-
+        
         embed = discord.Embed(
-            title="🔗 Invite Rukiya Bot",
+            title="🔗 Invite Me!",
             description=f"[Click here to invite me to your server!]({invite_url})",
-            color=discord.Color.blurple()
+            color=discord.Color.blue()
         )
-
+        
         embed.add_field(
-            name="Required Permissions",
-            value=(
-                "• Send Messages\n"
-                "• Embed Links\n"
-                "• Read Message History\n"
-                "• Use Slash Commands"
-            ),
+            name="Permissions",
+            value="• Read Messages\n• Send Messages\n• Embed Links\n• Read Message History\n• Use Slash Commands",
             inline=False
         )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(UtilityCommands(bot))
