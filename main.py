@@ -5,6 +5,8 @@ import logging
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
+from aiohttp import web
+import threading
 
 from services.config import Config
 from services.youtube_service import YouTubeService
@@ -87,10 +89,32 @@ class RukiyaBot(commands.Bot):
         logger.info(f"🚀 {self.user} is online and ready!")
         logger.info(f"📊 Connected to {len(self.guilds)} guild(s)")
 
+async def health_check(request):
+    """Simple health check endpoint for Render"""
+    return web.Response(text="Bot is running!", status=200)
+
+async def start_web_server():
+    """Start a simple web server for health checks"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.getenv('PORT', 8080))  # Render provides PORT env variable
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Health check server started on port {port}")
+
 async def main():
     """Main function to run the bot"""
     try:
         bot = RukiyaBot()
+        
+        # Always start health check server for Render Web Service
+        await start_web_server()
+        
+        # Start the Discord bot
         await bot.start(bot.config.discord_token)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
