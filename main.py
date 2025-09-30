@@ -69,7 +69,8 @@ class RukiyaBot(commands.Bot):
             'cogs.admin_commands', 
             'cogs.utility_commands',
             'cogs.events',
-            'welcome.py'
+            'cogs.welcome.py',
+            'cogs.shayari.py'
         ]
 
         for cog in cogs_to_load:
