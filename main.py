@@ -61,25 +61,20 @@ class RukiyaBot(commands.Bot):
 
         logger.info("Bot initialized successfully")
 
-    async def setup_hook(self):
-        """Setup hook to load cogs and sync commands"""
-        # Load all cogs
-        cogs_to_load = [
-            'cogs.youtube_commands',
-            'cogs.admin_commands', 
-            'cogs.utility_commands',
-            'cogs.events',
-            'cogs.welcome.py',
-            'cogs.shayari.py'
-        ]
+        async def setup_hook(self):
+        """Automatically load all cogs in cogs/ folder and sync slash commands"""
+        cogs_folder = os.path.join(os.path.dirname(__file__), 'cogs')
+        for filename in os.listdir(cogs_folder):
+            if filename.endswith('.py') and not filename.startswith('__'):
+                cog_name = filename[:-3]  # remove '.py'
+                module_path = f'cogs.{cog_name}'
+                try:
+                    await self.load_extension(module_path)
+                    logger.info(f"✅ Loaded cog: {module_path}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to load cog {module_path}: {e}")
 
-        for cog in cogs_to_load:
-            try:
-                await self.load_extension(cog)
-                logger.info(f"✅ Loaded cog: {cog}")
-            except Exception as e:
-                logger.error(f"❌ Failed to load cog {cog}: {e}")
-
+        
         # Sync slash commands
         try:
             synced = await self.tree.sync()
