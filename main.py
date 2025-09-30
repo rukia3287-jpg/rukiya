@@ -61,7 +61,7 @@ class RukiyaBot(commands.Bot):
 
         logger.info("Bot initialized successfully")
 
-        async def setup_hook(self):
+    async def setup_hook(self):
         """Automatically load all cogs in cogs/ folder and sync slash commands"""
         cogs_folder = os.path.join(os.path.dirname(__file__), 'cogs')
         for filename in os.listdir(cogs_folder):
@@ -74,7 +74,6 @@ class RukiyaBot(commands.Bot):
                 except Exception as e:
                     logger.error(f"❌ Failed to load cog {module_path}: {e}")
 
-        
         # Sync slash commands
         try:
             synced = await self.tree.sync()
