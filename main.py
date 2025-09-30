@@ -68,7 +68,8 @@ class RukiyaBot(commands.Bot):
             'cogs.youtube_commands',
             'cogs.admin_commands', 
             'cogs.utility_commands',
-            'cogs.events'
+            'cogs.events',
+            'welcome.py'
         ]
 
         for cog in cogs_to_load:
