@@ -1,11 +1,11 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Callable, List
 
 logger = logging.getLogger(__name__)
 
 class ChatMonitor:
-    """Monitors YouTube chat"""
+    """Monitors YouTube chat with pub-sub pattern"""
 
     def __init__(self, youtube_service, ai_service, config):
         self.youtube = youtube_service
@@ -16,6 +16,33 @@ class ChatMonitor:
         self.next_page_token = None
         self.video_id = None
         self.processed_messages = set()
+        
+        # Pub-sub pattern for message subscribers
+        self.subscribers: List[Callable] = []
+
+    def subscribe(self, callback: Callable):
+        """Subscribe to chat messages
+        
+        Args:
+            callback: Async function that takes (message: str, author: str)
+        """
+        if callback not in self.subscribers:
+            self.subscribers.append(callback)
+            logger.info(f"New subscriber added: {callback.__name__}")
+    
+    def unsubscribe(self, callback: Callable):
+        """Unsubscribe from chat messages"""
+        if callback in self.subscribers:
+            self.subscribers.remove(callback)
+            logger.info(f"Subscriber removed: {callback.__name__}")
+    
+    async def _notify_subscribers(self, message: str, author: str):
+        """Notify all subscribers of new message"""
+        for callback in self.subscribers:
+            try:
+                await callback(message, author)
+            except Exception as e:
+                logger.error(f"Error in subscriber {callback.__name__}: {e}")
 
     def start_monitoring(self, live_chat_id: str, video_id: str = None):
         """Start monitoring chat"""
@@ -42,7 +69,8 @@ class ChatMonitor:
             "live_chat_id": self.live_chat_id,
             "video_id": self.video_id,
             "processed_count": len(self.processed_messages),
-            "ai_cooldown_remaining": self.ai.get_cooldown_remaining()
+            "ai_cooldown_remaining": self.ai.get_cooldown_remaining(),
+            "subscribers_count": len(self.subscribers)
         }
 
     async def process_messages(self):
@@ -73,8 +101,11 @@ class ChatMonitor:
                     continue
 
                 self.processed_messages.add(message_id)
+                
+                # Notify subscribers first (for welcome messages, etc.)
+                await self._notify_subscribers(message, author)
 
-                # Generate AI response
+                # Generate AI response (main bot functionality)
                 ai_response = self.ai.generate_response(message, author)
                 if ai_response:
                     success = self.youtube.send_message(self.live_chat_id, ai_response)
