@@ -260,33 +260,44 @@ class WelcomeMessages(commands.Cog):
                 logger.error(f"❌ Invalid message type or empty: {type(message)}")
                 return False
             
-            # Validate youtube service exists and is callable
+            # Validate youtube service exists
             if not self.youtube:
                 logger.error("❌ YouTube service not initialized")
                 return False
             
-            # Check if send_message is a method
+            # Check if send_message exists
             if not hasattr(self.youtube, 'send_message'):
                 logger.error("❌ YouTube service missing send_message method")
                 return False
             
-            # Call the method - handle both async and sync versions
-            send_method = getattr(self.youtube, 'send_message')
-            if asyncio.iscoroutinefunction(send_method):
-                await send_method(message)
-            else:
-                send_method(message)
-            
-            return True
+            # Try direct call first (normal instance method)
+            try:
+                send_method = self.youtube.send_message
+                if asyncio.iscoroutinefunction(send_method):
+                    await send_method(message)
+                else:
+                    send_method(message)
+                return True
+            except TypeError as type_err:
+                # If that fails, self.youtube might be a class, not instance
+                # Try calling as unbound method
+                logger.debug(f"Direct call failed with {type_err}, trying unbound method pattern")
+                send_method = self.youtube.send_message
+                if asyncio.iscoroutinefunction(send_method):
+                    await send_method(self.youtube, message)
+                else:
+                    send_method(self.youtube, message)
+                return True
             
         except TypeError as e:
-            # This catches the "missing positional argument" error
             logger.error(f"❌ Method signature error: {e}")
             logger.debug(f"YouTube service type: {type(self.youtube)}")
             logger.debug(f"send_message type: {type(getattr(self.youtube, 'send_message', None))}")
             return False
         except Exception as e:
             logger.error(f"❌ Failed to send message: {e}")
+            import traceback
+            logger.debug(f"Full traceback: {traceback.format_exc()}")
             return False
     
     async def on_chat_message(self, message: str, author: str):
