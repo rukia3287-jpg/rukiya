@@ -2,17 +2,35 @@ import os
 import json
 import logging
 import tempfile
-from typing import Optional, Dict, Any
+import time
+from typing import Optional, Dict, Any, List
+from datetime import datetime
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+
+class Config:
+    """Configuration class"""
+    def __init__(self):
+        self.client_secrets_file = None
+        self.token_file = None
+        self.video_id = os.getenv("YOUTUBE_VIDEO_ID", "")
+        self.poll_interval = int(os.getenv("POLL_INTERVAL", "5"))
+        self.bot_name = os.getenv("BOT_NAME", "AI Assistant")
+
 
 class YouTubeService:
     """Handles YouTube API operations optimized for Render deployment"""
 
-    def __init__(self, config):
+    def __init__(self, config: Config):
         self.config = config
         self.youtube = None
         self._setup_credentials()
@@ -122,7 +140,7 @@ class YouTubeService:
                     logger.info("🔄 Token expired, attempting refresh...")
                     try:
                         creds.refresh(Request())
-                        # Save refreshed token
+                        # Save refreshed token back to temp file
                         with open(self.config.token_file, 'w') as f:
                             f.write(creds.to_json())
                         logger.info("✅ Token refreshed successfully")
@@ -188,7 +206,7 @@ class YouTubeService:
             logger.error(f"Failed to get live chat ID: {e}")
             return None
 
-    def get_chat_messages(self, live_chat_id: str, page_token: str = None) -> Dict[str, Any]:
+    def get_chat_messages(self, live_chat_id: str, page_token: Optional[str] = None) -> Dict[str, Any]:
         """Get live chat messages"""
         try:
             if not self.youtube:
@@ -262,3 +280,175 @@ class YouTubeService:
             "client_secrets_path": getattr(self.config, 'client_secrets_file', None),
             "token_path": getattr(self.config, 'token_file', None)
         }
+
+
+class ChatBot:
+    """Main chat bot that monitors and responds to YouTube live chat"""
+    
+    def __init__(self, youtube_service: YouTubeService, config: Config):
+        self.youtube = youtube_service
+        self.config = config
+        self.processed_messages: set = set()
+        self.live_chat_id: Optional[str] = None
+        self.next_page_token: Optional[str] = None
+        self.running = False
+        
+    def process_message(self, message_data: Dict[str, Any]) -> Optional[str]:
+        """
+        Process incoming message and generate response
+        Override this method to implement custom bot logic
+        """
+        try:
+            snippet = message_data.get("snippet", {})
+            author_details = message_data.get("authorDetails", {})
+            
+            message_text = snippet.get("displayMessage", "")
+            author_name = author_details.get("displayName", "Unknown")
+            message_id = message_data.get("id", "")
+            
+            # Skip if already processed
+            if message_id in self.processed_messages:
+                return None
+            
+            # Mark as processed
+            self.processed_messages.add(message_id)
+            
+            # Skip bot's own messages
+            if author_details.get("isChatOwner", False) or author_details.get("isChatModerator", False):
+                return None
+            
+            logger.info(f"Processing message from {author_name}: {message_text}")
+            
+            # Simple echo bot logic - customize this!
+            if message_text.lower().startswith("!hello"):
+                return f"Hello {author_name}! 👋"
+            elif message_text.lower().startswith("!time"):
+                return f"Current time: {datetime.now().strftime('%H:%M:%S')}"
+            elif message_text.lower().startswith("!help"):
+                return "Commands: !hello, !time, !help"
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            return None
+    
+    def start(self, video_id: str):
+        """Start monitoring the chat"""
+        try:
+            logger.info(f"Starting chat bot for video: {video_id}")
+            
+            # Get live chat ID
+            self.live_chat_id = self.youtube.get_live_chat_id(video_id)
+            if not self.live_chat_id:
+                logger.error("Could not get live chat ID. Is the stream live?")
+                return False
+            
+            logger.info(f"Monitoring chat: {self.live_chat_id}")
+            self.running = True
+            
+            # Main loop
+            while self.running:
+                try:
+                    # Get messages
+                    response = self.youtube.get_chat_messages(
+                        self.live_chat_id, 
+                        self.next_page_token
+                    )
+                    
+                    if not response:
+                        logger.warning("Empty response from chat API")
+                        time.sleep(self.config.poll_interval)
+                        continue
+                    
+                    # Update next page token
+                    self.next_page_token = response.get("nextPageToken")
+                    
+                    # Process messages
+                    messages = response.get("items", [])
+                    for message in messages:
+                        response_text = self.process_message(message)
+                        if response_text:
+                            # Send response
+                            success = self.youtube.send_message(
+                                self.live_chat_id, 
+                                response_text
+                            )
+                            if success:
+                                logger.info(f"Sent response: {response_text}")
+                            else:
+                                logger.error("Failed to send response")
+                    
+                    # Wait before next poll
+                    poll_interval_ms = response.get("pollingIntervalMillis", self.config.poll_interval * 1000)
+                    time.sleep(poll_interval_ms / 1000)
+                    
+                except KeyboardInterrupt:
+                    logger.info("Received interrupt signal")
+                    self.running = False
+                    break
+                except Exception as e:
+                    logger.error(f"Error in main loop: {e}")
+                    time.sleep(self.config.poll_interval)
+            
+            logger.info("Chat bot stopped")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start chat bot: {e}")
+            return False
+    
+    def stop(self):
+        """Stop the bot"""
+        self.running = False
+        logger.info("Stopping chat bot...")
+
+
+def main():
+    """Main entry point"""
+    try:
+        logger.info("=" * 60)
+        logger.info("YouTube Live Chat Bot Starting")
+        logger.info("=" * 60)
+        
+        # Create config
+        config = Config()
+        
+        # Validate configuration
+        if not config.video_id:
+            logger.error("YOUTUBE_VIDEO_ID environment variable not set!")
+            logger.error("Please set it to your YouTube video ID")
+            return
+        
+        logger.info(f"Video ID: {config.video_id}")
+        logger.info(f"Poll Interval: {config.poll_interval}s")
+        
+        # Create YouTube service
+        youtube_service = YouTubeService(config)
+        
+        # Authenticate
+        if not youtube_service.authenticate():
+            logger.error("Failed to authenticate with YouTube")
+            return
+        
+        # Test connection
+        if not youtube_service.test_connection():
+            logger.error("YouTube API connection test failed")
+            return
+        
+        # Get service status
+        status = youtube_service.get_status()
+        logger.info(f"Service Status: {json.dumps(status, indent=2)}")
+        
+        # Create and start bot
+        bot = ChatBot(youtube_service, config)
+        bot.start(config.video_id)
+        
+    except KeyboardInterrupt:
+        logger.info("\nShutting down gracefully...")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()
