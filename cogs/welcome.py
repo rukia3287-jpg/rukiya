@@ -1,424 +1,495 @@
-import random
+import discord
+from discord.ext import commands, tasks
 import logging
-import asyncio
-from datetime import datetime, timedelta
-from collections import deque
-from discord.ext import commands
-import google.generativeai as genai
+import json
 import os
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List
+import asyncio
 
 logger = logging.getLogger(__name__)
 
-class WelcomeMessages(commands.Cog):
-    """Advanced cog for welcoming new viewers in YouTube chat with Gemini AI integration"""
+class Welcome(commands.Cog):
+    """Cog for welcoming and saying farewell to users in YouTube chat"""
     
     def __init__(self, bot):
         self.bot = bot
-        self.youtube = bot.youtube_service
-        self.chat_monitor = bot.chat_monitor
+        self.user_data_file = "user_activity.json"
+        self.backup_file = "user_activity_backup.json"
+        self.user_last_seen: Dict[str, str] = {}  # username -> last_seen timestamp
+        self.user_last_welcomed: Dict[str, str] = {}  # username -> last_welcomed timestamp
+        self.active_users: set = set()  # Currently active users
         
-        # Initialize Gemini AI (Flash 2.0)
-        self._init_gemini()
+        # Time thresholds (in seconds)
+        self.welcome_back_after = 3600  # Welcome back after 1 hour of absence
+        self.farewell_after = 600  # Say farewell after 10 minutes of inactivity
         
-        # Track greeted users with timestamps for session management
-        self.greeted_users = {}  # {user: timestamp}
-        self.session_timeout = timedelta(hours=2)  # Reset after 2 hours
+        # Fallback settings
+        self.max_retries = 3
+        self.retry_delay = 2  # seconds
+        self.fallback_enabled = True
         
-        # AI response caching to reduce API calls
-        self.ai_cache = deque(maxlen=20)  # Cache last 20 AI responses
-        self.cache_hit_count = 0
+        # Message queue for failed sends
+        self.message_queue: List[dict] = []
+        self.max_queue_size = 50
         
-        # Rate limiting to prevent spam
-        self.last_welcome_time = None
-        self.min_welcome_interval = 3  # Minimum 3 seconds between welcomes
+        # Error tracking
+        self.error_count = 0
+        self.last_error_time = None
         
-        # AI configuration
-        self.ai_enabled = True
-        self.ai_timeout = 3.0  # 3 second timeout for AI generation
-        self.ai_failure_count = 0
-        self.max_ai_failures = 3  # Disable AI temporarily after 3 failures
-        self.ai_cooldown_until = None
+        # Initialize data
+        self.load_user_data()
         
-        # Tiered fallback system
-        self.premium_welcomes = [
-            "Arre {user}, aap aa gaye! Stream ab complete ho gayi 🎉",
-            "Welcome {user}, aapka intezaar tha! Enjoy the vibes ✨",
-            "{user} ji, swagat hai! Baith jao aaram se 🪑",
-            "Dekho kaun aaya - {user}! Finally stream interesting ho gayi 😎",
-            "Ayy {user}, perfect timing! Ab maza aayega 🔥"
-        ]
+        # Start background tasks
+        self.check_inactive_users.start()
+        self.retry_failed_messages.start()
+        self.auto_backup.start()
         
-        self.standard_welcomes = [
-            "Arre {user}, finally aa gaye tum! 👋",
-            "Swagat hai {user}, chat ab zinda lag rahi hai 😏",
-            "{user} aa gaye, ab maja aayega! 🔥",
-            "Welcome {user}, bas tumhari hi kami thi 😎",
-            "Oho {user}, entry maarte hi dhamaka! 💥"
-        ]
-        
-        self.simple_welcomes = [
-            "Welcome {user}! 👋",
-            "Hey {user}, enjoy the stream! 🎉",
-            "{user} joined! 😊",
-            "Namaste {user}! 🙏",
-            "Hi {user}, glad you're here! ✨"
-        ]
-        
-        # Subscribe to YouTube chat messages
-        self.chat_monitor.subscribe(self.on_chat_message)
-        
-        # Start background cleanup task
-        self.cleanup_task = asyncio.create_task(self._cleanup_old_users())
-        logger.info("✅ WelcomeMessages cog initialized with Gemini Flash 2.0")
-    
-    def _init_gemini(self):
-        """Initialize Gemini AI with Flash 2.0 model"""
-        try:
-            # Get API key from environment variable
-            api_key = os.getenv('GEMINI_API_KEY')
-            
-            if not api_key:
-                logger.warning("⚠️ GEMINI_API_KEY not found in environment variables")
-                self.gemini_model = None
-                self.ai_enabled = False
-                return
-            
-            # Configure Gemini
-            genai.configure(api_key=api_key)
-            
-            # Initialize Flash 2.0 model with optimized settings
-            generation_config = {
-                "temperature": 0.9,  # Higher creativity for fun welcomes
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 100,  # Short welcome messages
-                "response_mime_type": "text/plain",
-            }
-            
-            safety_settings = [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-            ]
-            
-            self.gemini_model = genai.GenerativeModel(
-                model_name="gemini-2.0-flash-exp",  # Flash 2.0 model
-                generation_config=generation_config,
-                safety_settings=safety_settings,
-            )
-            
-            logger.info("✅ Gemini Flash 2.0 initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Gemini: {e}")
-            self.gemini_model = None
-            self.ai_enabled = False
-    
-    def _should_welcome(self, user: str) -> bool:
-        """Check if user should be welcomed based on multiple criteria"""
-        # Check if user was already greeted recently
-        if user in self.greeted_users:
-            last_greeted = self.greeted_users[user]
-            if datetime.now() - last_greeted < self.session_timeout:
-                return False
-        
-        # Rate limiting - prevent spam
-        if self.last_welcome_time:
-            elapsed = (datetime.now() - self.last_welcome_time).total_seconds()
-            if elapsed < self.min_welcome_interval:
-                logger.debug(f"⏱️ Rate limit: Skipping welcome for {user}")
-                return False
-        
-        return True
-    
-    def _is_ai_available(self) -> bool:
-        """Check if AI service is available and not in cooldown"""
-        if not self.ai_enabled or not self.gemini_model:
-            return False
-        
-        # Check if AI is in cooldown due to failures
-        if self.ai_cooldown_until:
-            if datetime.now() < self.ai_cooldown_until:
-                return False
-            else:
-                # Cooldown expired, reset failure count
-                self.ai_cooldown_until = None
-                self.ai_failure_count = 0
-                logger.info("🔄 AI cooldown expired, re-enabling Gemini welcomes")
-        
-        return True
-    
-    async def _generate_ai_welcome(self, user: str) -> str:
-        """Generate AI welcome using Gemini Flash 2.0 with timeout and error handling"""
-        try:
-            # Check cache first for similar patterns
-            if self.ai_cache and random.random() < 0.3:  # 30% chance to reuse
-                cached = random.choice(self.ai_cache).format(user=user)
-                self.cache_hit_count += 1
-                logger.debug(f"💾 Cache hit #{self.cache_hit_count}: Using cached AI response")
-                return cached
-            
-            # Generate fresh AI response with timeout
-            prompt = (
-                f"Generate a short, friendly, and funny Hinglish welcome message for a YouTube "
-                f"livestream chat. The user's name is '{user}'. "
-                f"Requirements:\n"
-                f"- Use casual Indian slang and mix of Hindi and English\n"
-                f"- Include 1-2 emojis\n"
-                f"- Keep it under 12 words\n"
-                f"- Make it unique, engaging, and fun\n"
-                f"- Don't use offensive language\n"
-                f"- Examples style: 'Arre {user}, finally! Stream ab complete 🎉' or 'Welcome {user} ji, perfect timing! 🔥'\n\n"
-                f"Just give the welcome message, nothing else."
-            )
-            
-            # Run Gemini generation in executor to make it async
-            loop = asyncio.get_event_loop()
-            
-            async def generate_with_timeout():
-                return await loop.run_in_executor(
-                    None,
-                    lambda: self.gemini_model.generate_content(prompt)
-                )
-            
-            response = await asyncio.wait_for(
-                generate_with_timeout(),
-                timeout=self.ai_timeout
-            )
-            
-            # Extract text from response
-            if response and response.text:
-                welcome_msg = response.text.strip()
-                
-                # Validate response
-                if len(welcome_msg) < 5 or len(welcome_msg) > 200:
-                    raise ValueError(f"Invalid response length: {len(welcome_msg)}")
-                
-                # Remove quotes if Gemini wrapped the message
-                welcome_msg = welcome_msg.strip('"\'')
-                
-                # Cache the response template (replace username with placeholder)
-                template = welcome_msg.replace(user, "{user}")
-                if template not in self.ai_cache:
-                    self.ai_cache.append(template)
-                
-                # Reset failure count on success
-                self.ai_failure_count = 0
-                
-                return welcome_msg
-            else:
-                raise ValueError("Empty response from Gemini")
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"⏱️ Gemini timeout for {user}, using fallback")
-            self._handle_ai_failure()
-            return None
-        except Exception as e:
-            logger.error(f"❌ Gemini generation failed for {user}: {e}")
-            self._handle_ai_failure()
-            return None
-    
-    def _handle_ai_failure(self):
-        """Handle AI failures and implement cooldown if needed"""
-        self.ai_failure_count += 1
-        
-        if self.ai_failure_count >= self.max_ai_failures:
-            # Put AI in cooldown for 5 minutes
-            self.ai_cooldown_until = datetime.now() + timedelta(minutes=5)
-            logger.warning(
-                f"⚠️ Gemini disabled temporarily due to {self.ai_failure_count} failures. "
-                f"Cooldown until {self.ai_cooldown_until.strftime('%H:%M:%S')}"
-            )
-    
-    def _get_fallback_welcome(self, user: str, tier: int = 1) -> str:
-        """Get fallback welcome message based on tier (1=premium, 2=standard, 3=simple)"""
-        if tier == 1:
-            return random.choice(self.premium_welcomes).format(user=user)
-        elif tier == 2:
-            return random.choice(self.standard_welcomes).format(user=user)
-        else:
-            return random.choice(self.simple_welcomes).format(user=user)
-    
-    async def _send_youtube_message(self, message: str) -> bool:
-        """Safely send a message to YouTube chat with validation"""
-        try:
-            # Validate the message
-            if not message or not isinstance(message, str):
-                logger.error(f"❌ Invalid message type or empty: {type(message)}")
-                return False
-            
-            # Validate youtube service exists
-            if not self.youtube:
-                logger.error("❌ YouTube service not initialized")
-                return False
-            
-            # Check if send_message exists
-            if not hasattr(self.youtube, 'send_message'):
-                logger.error("❌ YouTube service missing send_message method")
-                return False
-            
-            # Try direct call first (normal instance method)
-            try:
-                send_method = self.youtube.send_message
-                if asyncio.iscoroutinefunction(send_method):
-                    await send_method(message)
-                else:
-                    send_method(message)
-                return True
-            except TypeError as type_err:
-                # If that fails, self.youtube might be a class, not instance
-                # Try calling as unbound method
-                logger.debug(f"Direct call failed with {type_err}, trying unbound method pattern")
-                send_method = self.youtube.send_message
-                if asyncio.iscoroutinefunction(send_method):
-                    await send_method(self.youtube, message)
-                else:
-                    send_method(self.youtube, message)
-                return True
-            
-        except TypeError as e:
-            logger.error(f"❌ Method signature error: {e}")
-            logger.debug(f"YouTube service type: {type(self.youtube)}")
-            logger.debug(f"send_message type: {type(getattr(self.youtube, 'send_message', None))}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Failed to send message: {e}")
-            import traceback
-            logger.debug(f"Full traceback: {traceback.format_exc()}")
-            return False
-    
-    async def on_chat_message(self, message: str, author: str):
-        """Handle incoming chat messages and send welcomes for new users"""
-        user = author.strip()
-        
-        # Validate user
-        if not user or len(user) < 2:
-            return
-        
-        # Check if should welcome
-        if not self._should_welcome(user):
-            return
-        
-        welcome_msg = None
-        fallback_tier = 1
-        
-        try:
-            # Try AI generation first if available
-            if self._is_ai_available():
-                logger.debug(f"🤖 Attempting Gemini welcome for {user}")
-                welcome_msg = await self._generate_ai_welcome(user)
-                
-                if welcome_msg:
-                    logger.info(f"✨ Gemini Welcome: {user} → {welcome_msg}")
-                else:
-                    fallback_tier = 1  # Use premium fallback
-            else:
-                logger.debug(f"⚠️ Gemini unavailable, using fallback tier {fallback_tier}")
-                fallback_tier = 2  # Use standard fallback
-            
-            # Use fallback if AI failed or unavailable
-            if not welcome_msg:
-                welcome_msg = self._get_fallback_welcome(user, fallback_tier)
-                logger.info(f"🎯 Fallback Welcome (tier {fallback_tier}): {user} → {welcome_msg}")
-            
-            # Send the message using the safe wrapper
-            success = await self._send_youtube_message(welcome_msg)
-            
-            if success:
-                # Update tracking only if message was sent successfully
-                self.greeted_users[user] = datetime.now()
-                self.last_welcome_time = datetime.now()
-            else:
-                logger.warning(f"⚠️ Failed to send welcome to {user}, will retry on next message")
-            
-        except Exception as e:
-            # Final emergency fallback
-            logger.error(f"❌ Critical error welcoming {user}: {e}")
-            try:
-                emergency_msg = self._get_fallback_welcome(user, 3)
-                success = await self._send_youtube_message(emergency_msg)
-                
-                if success:
-                    self.greeted_users[user] = datetime.now()
-                    logger.info(f"🆘 Emergency fallback used for {user}")
-                else:
-                    logger.critical(f"💥 Emergency fallback also failed for {user}")
-                    
-            except Exception as critical_error:
-                logger.critical(f"💥 All fallback attempts failed for {user}: {critical_error}")
-    
-    async def _cleanup_old_users(self):
-        """Background task to clean up old greeted users"""
-        while True:
-            try:
-                await asyncio.sleep(600)  # Run every 10 minutes
-                
-                now = datetime.now()
-                expired = [
-                    user for user, timestamp in self.greeted_users.items()
-                    if now - timestamp > self.session_timeout
-                ]
-                
-                for user in expired:
-                    del self.greeted_users[user]
-                
-                if expired:
-                    logger.info(f"🧹 Cleaned up {len(expired)} expired user sessions")
-                
-            except Exception as e:
-                logger.error(f"❌ Error in cleanup task: {e}")
+        logger.info("✅ Welcome cog initialized with fallback system")
     
     def cog_unload(self):
-        """Cleanup when cog is unloaded"""
-        if hasattr(self, 'cleanup_task'):
-            self.cleanup_task.cancel()
-        logger.info("👋 WelcomeMessages cog unloaded")
+        """Clean up when cog is unloaded"""
+        try:
+            self.check_inactive_users.cancel()
+            self.retry_failed_messages.cancel()
+            self.auto_backup.cancel()
+            self.save_user_data()
+            logger.info("🛑 Welcome cog unloaded safely")
+        except Exception as e:
+            logger.error(f"❌ Error during cog unload: {e}")
+    
+    def load_user_data(self):
+        """Load user activity data from JSON file with fallback"""
+        loaded = False
+        
+        # Try loading main file
+        try:
+            if os.path.exists(self.user_data_file):
+                with open(self.user_data_file, 'r') as f:
+                    data = json.load(f)
+                    self.user_last_seen = data.get('last_seen', {})
+                    self.user_last_welcomed = data.get('last_welcomed', {})
+                logger.info(f"📂 Loaded data for {len(self.user_last_seen)} users")
+                loaded = True
+        except json.JSONDecodeError as e:
+            logger.error(f"⚠️ Corrupted main data file: {e}")
+        except Exception as e:
+            logger.error(f"❌ Failed to load main data file: {e}")
+        
+        # Fallback to backup file if main file failed
+        if not loaded and os.path.exists(self.backup_file):
+            try:
+                with open(self.backup_file, 'r') as f:
+                    data = json.load(f)
+                    self.user_last_seen = data.get('last_seen', {})
+                    self.user_last_welcomed = data.get('last_welcomed', {})
+                logger.info(f"🔄 Restored from backup: {len(self.user_last_seen)} users")
+                # Try to repair main file
+                self.save_user_data()
+            except Exception as e:
+                logger.error(f"❌ Failed to load backup file: {e}")
+        
+        # Initialize empty if both failed
+        if not loaded and not os.path.exists(self.backup_file):
+            self.user_last_seen = {}
+            self.user_last_welcomed = {}
+            logger.info("📝 Initialized with empty user data")
+    
+    def save_user_data(self, create_backup: bool = True):
+        """Save user activity data to JSON file with error handling"""
+        data = {
+            'last_seen': self.user_last_seen,
+            'last_welcomed': self.user_last_welcomed,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Try saving to main file
+        try:
+            with open(self.user_data_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Failed to save main data file: {e}")
+            return False
+        
+        # Create backup if requested
+        if create_backup:
+            try:
+                with open(self.backup_file, 'w') as f:
+                    json.dump(data, f, indent=2)
+            except Exception as e:
+                logger.error(f"⚠️ Failed to create backup: {e}")
+        
+        return True
+    
+    def should_welcome(self, username: str) -> bool:
+        """Check if user should be welcomed with error handling"""
+        try:
+            now = datetime.now()
+            
+            # First time user
+            if username not in self.user_last_seen:
+                return True
+            
+            # Check if user was away for a while
+            last_seen = datetime.fromisoformat(self.user_last_seen[username])
+            time_away = (now - last_seen).total_seconds()
+            
+            if time_away > self.welcome_back_after:
+                # Check if we already welcomed them recently
+                if username in self.user_last_welcomed:
+                    last_welcomed = datetime.fromisoformat(self.user_last_welcomed[username])
+                    if (now - last_welcomed).total_seconds() < 60:  # Don't spam welcomes
+                        return False
+                return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"❌ Error in should_welcome for {username}: {e}")
+            return False
+    
+    async def process_youtube_message(self, username: str, message: str):
+        """Process incoming YouTube chat message with error handling"""
+        try:
+            now = datetime.now().isoformat()
+            
+            # Validate username
+            if not username or not isinstance(username, str):
+                logger.warning(f"⚠️ Invalid username received: {username}")
+                return
+            
+            # Update last seen time
+            self.user_last_seen[username] = now
+            
+            # Add to active users
+            if username not in self.active_users:
+                self.active_users.add(username)
+                
+                # Check if we should welcome them
+                if self.should_welcome(username):
+                    success = await self.send_welcome(username)
+                    if success:
+                        self.user_last_welcomed[username] = now
+            
+            # Save data periodically (but don't block on failure)
+            try:
+                self.save_user_data(create_backup=False)
+            except Exception as e:
+                logger.error(f"⚠️ Failed to save data: {e}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error processing message from {username}: {e}")
+            self.error_count += 1
+            self.last_error_time = datetime.now()
+    
+    async def send_message_with_retry(self, message: str, message_type: str = "general") -> bool:
+        """Send message with retry logic and fallback"""
+        for attempt in range(self.max_retries):
+            try:
+                # Check if chat monitor is available
+                if not hasattr(self.bot, 'chat_monitor'):
+                    logger.error("❌ Chat monitor not available")
+                    break
+                
+                # Try sending the message
+                await self.bot.chat_monitor.send_chat_message(message)
+                logger.info(f"✅ Message sent successfully: {message[:50]}...")
+                return True
+                
+            except AttributeError as e:
+                logger.error(f"❌ Chat monitor method not found: {e}")
+                break  # Don't retry if method doesn't exist
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ Timeout on attempt {attempt + 1}/{self.max_retries}")
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))
+                    
+            except Exception as e:
+                logger.error(f"❌ Error sending message (attempt {attempt + 1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay * (attempt + 1))
+        
+        # All retries failed - add to queue if fallback is enabled
+        if self.fallback_enabled and len(self.message_queue) < self.max_queue_size:
+            self.message_queue.append({
+                'message': message,
+                'type': message_type,
+                'timestamp': datetime.now().isoformat(),
+                'attempts': 0
+            })
+            logger.info(f"📥 Message queued for retry: {message[:50]}...")
+        
+        return False
+    
+    async def send_welcome(self, username: str) -> bool:
+        """Send welcome message to YouTube chat with error handling"""
+        try:
+            # Check if user is first time or returning
+            if username not in self.user_last_welcomed:
+                welcome_msg = f"🎉 Welcome @{username}! Great to have you here with Rukiya!"
+            else:
+                welcome_msg = f"👋 Welcome back @{username}! Rukiya is glad to see you again!"
+            
+            success = await self.send_message_with_retry(welcome_msg, "welcome")
+            
+            if success:
+                logger.info(f"💬 Welcomed user: {username}")
+            else:
+                logger.warning(f"⚠️ Failed to welcome user: {username}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to send welcome message for {username}: {e}")
+            return False
+    
+    async def send_farewell(self, username: str) -> bool:
+        """Send farewell message to YouTube chat with error handling"""
+        try:
+            import random
+            farewell_messages = [
+                f"👋 See you later @{username}! Thanks for hanging out with Rukiya!",
+                f"✨ Take care @{username}! Rukiya hopes to see you again soon!",
+                f"🌟 Goodbye @{username}! Come back anytime!"
+            ]
+            
+            farewell_msg = random.choice(farewell_messages)
+            success = await self.send_message_with_retry(farewell_msg, "farewell")
+            
+            if success:
+                logger.info(f"👋 Said farewell to user: {username}")
+            else:
+                logger.warning(f"⚠️ Failed to send farewell to: {username}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to send farewell message for {username}: {e}")
+            return False
+    
+    @tasks.loop(minutes=1)
+    async def check_inactive_users(self):
+        """Check for inactive users and say farewell with error handling"""
+        try:
+            now = datetime.now()
+            users_to_remove = []
+            
+            for username in list(self.active_users):
+                try:
+                    if username in self.user_last_seen:
+                        last_seen = datetime.fromisoformat(self.user_last_seen[username])
+                        time_inactive = (now - last_seen).total_seconds()
+                        
+                        if time_inactive > self.farewell_after:
+                            await self.send_farewell(username)
+                            users_to_remove.append(username)
+                except Exception as e:
+                    logger.error(f"❌ Error checking user {username}: {e}")
+            
+            # Remove inactive users
+            for username in users_to_remove:
+                self.active_users.discard(username)
+                
+        except Exception as e:
+            logger.error(f"❌ Error in check_inactive_users task: {e}")
+    
+    @check_inactive_users.before_loop
+    async def before_check_inactive_users(self):
+        """Wait until bot is ready"""
+        await self.bot.wait_until_ready()
+    
+    @tasks.loop(minutes=5)
+    async def retry_failed_messages(self):
+        """Retry sending failed messages from queue"""
+        if not self.message_queue:
+            return
+        
+        try:
+            logger.info(f"🔄 Retrying {len(self.message_queue)} queued messages")
+            successful = []
+            
+            for item in self.message_queue[:10]:  # Process up to 10 at a time
+                item['attempts'] += 1
+                
+                # Give up after 5 attempts
+                if item['attempts'] > 5:
+                    logger.warning(f"⚠️ Giving up on message after 5 attempts: {item['message'][:50]}")
+                    successful.append(item)
+                    continue
+                
+                # Try sending again
+                try:
+                    if hasattr(self.bot, 'chat_monitor'):
+                        await self.bot.chat_monitor.send_chat_message(item['message'])
+                        logger.info(f"✅ Successfully sent queued message")
+                        successful.append(item)
+                except Exception as e:
+                    logger.error(f"❌ Failed to send queued message: {e}")
+            
+            # Remove successful messages from queue
+            for item in successful:
+                self.message_queue.remove(item)
+                
+        except Exception as e:
+            logger.error(f"❌ Error in retry_failed_messages task: {e}")
+    
+    @retry_failed_messages.before_loop
+    async def before_retry_failed_messages(self):
+        """Wait until bot is ready"""
+        await self.bot.wait_until_ready()
+    
+    @tasks.loop(hours=1)
+    async def auto_backup(self):
+        """Automatically create backup of user data"""
+        try:
+            self.save_user_data(create_backup=True)
+            logger.info("💾 Auto-backup completed")
+        except Exception as e:
+            logger.error(f"❌ Auto-backup failed: {e}")
+    
+    @auto_backup.before_loop
+    async def before_auto_backup(self):
+        """Wait until bot is ready"""
+        await self.bot.wait_until_ready()
     
     @commands.command(name="welcomestats")
     @commands.has_permissions(administrator=True)
     async def welcome_stats(self, ctx):
-        """Display welcome system statistics (Admin only)"""
-        ai_status = "✅ Gemini Flash 2.0" if self.ai_enabled and self.gemini_model else "❌ Disabled"
-        stats = (
-            f"📊 **Welcome System Stats**\n"
-            f"└ Greeted users: {len(self.greeted_users)}\n"
-            f"└ AI: {ai_status}\n"
-            f"└ AI failures: {self.ai_failure_count}\n"
-            f"└ Cache hits: {self.cache_hit_count}\n"
-            f"└ Cache size: {len(self.ai_cache)}/20\n"
-            f"└ Cooldown: {'Active' if self.ai_cooldown_until and datetime.now() < self.ai_cooldown_until else 'None'}"
-        )
-        await ctx.send(stats)
+        """Show welcome system statistics"""
+        try:
+            embed = discord.Embed(
+                title="📊 Welcome System Statistics",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="👥 Total Users Tracked",
+                value=len(self.user_last_seen),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🟢 Currently Active",
+                value=len(self.active_users),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="📥 Queued Messages",
+                value=len(self.message_queue),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="⏱️ Welcome Back Threshold",
+                value=f"{self.welcome_back_after // 60} minutes",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="👋 Farewell Threshold",
+                value=f"{self.farewell_after // 60} minutes",
+                inline=True
+            )
+            
+            embed.add_field(
+                name="❌ Error Count",
+                value=self.error_count,
+                inline=True
+            )
+            
+            if self.last_error_time:
+                embed.add_field(
+                    name="🕐 Last Error",
+                    value=self.last_error_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    inline=False
+                )
+            
+            embed.add_field(
+                name="🔄 Fallback Status",
+                value="✅ Enabled" if self.fallback_enabled else "❌ Disabled",
+                inline=True
+            )
+            
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"❌ Error showing stats: {e}")
+            logger.error(f"❌ Error in welcomestats command: {e}")
     
-    @commands.command(name="testgemini")
+    @commands.command(name="setwelcometime")
     @commands.has_permissions(administrator=True)
-    async def test_gemini(self, ctx, *, username: str = "TestUser"):
-        """Test Gemini AI welcome generation (Admin only)"""
-        if not self._is_ai_available():
-            await ctx.send("❌ Gemini AI is not available or in cooldown")
-            return
-        
-        await ctx.send(f"🤖 Generating welcome for '{username}' using Gemini Flash 2.0...")
-        
-        welcome = await self._generate_ai_welcome(username)
-        
-        if welcome:
-            await ctx.send(f"✅ Generated: {welcome}")
-        else:
-            await ctx.send("❌ Failed to generate welcome")
+    async def set_welcome_time(self, ctx, minutes: int):
+        """Set the welcome back threshold in minutes"""
+        try:
+            if minutes < 1:
+                await ctx.send("❌ Time must be at least 1 minute!")
+                return
+            
+            self.welcome_back_after = minutes * 60
+            await ctx.send(f"✅ Welcome back threshold set to {minutes} minutes")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            logger.error(f"❌ Error in setwelcometime command: {e}")
+    
+    @commands.command(name="setfarewelltime")
+    @commands.has_permissions(administrator=True)
+    async def set_farewell_time(self, ctx, minutes: int):
+        """Set the farewell threshold in minutes"""
+        try:
+            if minutes < 1:
+                await ctx.send("❌ Time must be at least 1 minute!")
+                return
+            
+            self.farewell_after = minutes * 60
+            await ctx.send(f"✅ Farewell threshold set to {minutes} minutes")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            logger.error(f"❌ Error in setfarewelltime command: {e}")
+    
+    @commands.command(name="togglefallback")
+    @commands.has_permissions(administrator=True)
+    async def toggle_fallback(self, ctx):
+        """Toggle fallback system on/off"""
+        try:
+            self.fallback_enabled = not self.fallback_enabled
+            status = "enabled" if self.fallback_enabled else "disabled"
+            await ctx.send(f"✅ Fallback system {status}")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            logger.error(f"❌ Error in togglefallback command: {e}")
+    
+    @commands.command(name="clearqueue")
+    @commands.has_permissions(administrator=True)
+    async def clear_queue(self, ctx):
+        """Clear the message queue"""
+        try:
+            count = len(self.message_queue)
+            self.message_queue.clear()
+            await ctx.send(f"✅ Cleared {count} messages from queue")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            logger.error(f"❌ Error in clearqueue command: {e}")
+    
+    @commands.command(name="backupdata")
+    @commands.has_permissions(administrator=True)
+    async def backup_data(self, ctx):
+        """Manually create a backup of user data"""
+        try:
+            success = self.save_user_data(create_backup=True)
+            if success:
+                await ctx.send("✅ Backup created successfully")
+            else:
+                await ctx.send("❌ Failed to create backup")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            logger.error(f"❌ Error in backupdata command: {e}")
 
 async def setup(bot):
-    await bot.add_cog(WelcomeMessages(bot))
+    """Setup function to add the cog to the bot"""
+    try:
+        await bot.add_cog(Welcome(bot))
+        logger.info("✅ Welcome cog added successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to add Welcome cog: {e}")
+        raise
