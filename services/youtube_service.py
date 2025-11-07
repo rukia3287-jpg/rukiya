@@ -205,6 +205,45 @@ class YouTubeService:
             logger.error(f"Message was: {message}")
             return False
 
+    def get_video_info(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """Get basic video information"""
+        try:
+            if not self.youtube:
+                logger.error("YouTube service not authenticated")
+                return None
+
+            response = self.youtube.videos().list(
+                part="snippet,statistics,liveStreamingDetails",
+                id=video_id
+            ).execute()
+
+            if response.get("items"):
+                video_data = response["items"][0]
+                logger.info(f"Retrieved video info: {video_data.get('snippet', {}).get('title', 'Unknown')}")
+                return video_data
+            
+            logger.warning(f"No video found with ID: {video_id}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Failed to get video info: {e}")
+            return None
+
+    def test_connection(self) -> bool:
+        """Test the YouTube API connection"""
+        try:
+            if not self.youtube:
+                logger.error("YouTube service not initialized")
+                return False
+            
+            response = self.youtube.channels().list(part="snippet", mine=True).execute()
+            logger.info("✅ YouTube API connection test successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ YouTube API connection test failed: {e}")
+            return False
+
 
 class ChatBot:
     """YouTube Live Chat Bot with AI integration"""
