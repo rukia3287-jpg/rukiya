@@ -12,6 +12,8 @@ class AIService:
         self.config = config
         self.model = None
         self.last_used = 0
+        self.request_count = 0
+        self.request_window_start = time.time()
 
         if config.gemini_api_key:
             try:
@@ -44,6 +46,34 @@ class AIService:
         # Check triggers
         return any(trigger in message_lower for trigger in self.config.ai_triggers)
 
+    def _retry_with_backoff(self, prompt: str, max_retries: int = 3) -> Optional[str]:
+        """Retry API call with exponential backoff"""
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                if response.text:
+                    return response.text.strip()
+            except Exception as e:
+                error_msg = str(e)
+                
+                # Check if it's a 429 error
+                if "429" in error_msg or "Resource exhausted" in error_msg:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 1s, 2s, 4s
+                        wait_time = 2 ** attempt
+                        logger.warning(f"Rate limit hit, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"Rate limit exceeded after {max_retries} attempts")
+                        return None
+                else:
+                    # For other errors, don't retry
+                    logger.error(f"AI response generation failed: {e}")
+                    return None
+        
+        return None
+
     def generate_response(self, message: str, author: str) -> Optional[str]:
         """Generate AI response"""
         if not self.should_respond(message, author):
@@ -57,11 +87,10 @@ class AIService:
                 f"Use emojis and Hinglish style."
             )
 
-            response = self.model.generate_content(prompt)
+            generated_text = self._retry_with_backoff(prompt)
 
-            if response.text:
+            if generated_text:
                 self.last_used = time.time()
-                generated_text = response.text.strip()
 
                 # Truncate if too long
                 if len(generated_text) > self.config.max_message_length:
