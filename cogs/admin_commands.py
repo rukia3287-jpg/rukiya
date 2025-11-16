@@ -53,8 +53,9 @@ class AdminCommands(commands.Cog):
         finally:
             ai.last_used = orig_last
 
+    # method renamed to avoid starting with `bot_`
     @app_commands.command(name="bot_status", description="Get basic bot status")
-    async def bot_status(self, interaction: discord.Interaction):
+    async def status(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
