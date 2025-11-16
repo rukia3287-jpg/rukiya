@@ -27,8 +27,6 @@ class Utility(commands.Cog):
         embed = discord.Embed(title="Pong!", description=f"Latency: {latency_ms} ms", color=discord.Color.orange())
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_extensions := None  # placeholder to avoid accidental name errors
-
     @app_commands.command(name="uptime", description="Show bot uptime")
     async def uptime(self, interaction: discord.Interaction):
         try:
