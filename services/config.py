@@ -1,11 +1,13 @@
+# services/config.py
 from dataclasses import dataclass
-from typing import Set
+from typing import Set, Optional
+import os
 
 @dataclass
 class Config:
-    """Configuration class with validation"""
-    discord_token: str
-    gemini_api_key: str
+    """Configuration class with defaults and environment-friendly fields"""
+    discord_token: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
     client_secrets_file: str = "client_secret.json"
     token_file: str = "token.json"
 
@@ -18,19 +20,22 @@ class Config:
 
     def __post_init__(self):
         self.bot_users = {
-            "nightbot", "streamelements", "rukia", 
+            "nightbot", "streamelements", "rukia",
             "streamlabs", "rukiya", "moobot"
         }
         self.banned_words = {
             "spam", "scam", "fake", "stupid"
         }
         self.ai_triggers = {
-            "rukiya", "ru", "@rukiya", "@rukia", 
+            "rukiya", "ru", "@rukiya", "@rukia",
             "hey rukiya", "hi rukiya"
         }
 
-        # Validate required fields
-        if not self.discord_token:
-            raise ValueError("DISCORD_TOKEN is required")
-        if not self.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY is required")
+        # Optionally pick up OPENROUTER_API_KEY from environment if not provided
+        if not self.openrouter_api_key:
+            self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+
+        # Do not raise hard error here; allow running with AI disabled
+        if not self.openrouter_api_key:
+            # logger can be used by caller to warn; keep silent here
+            pass
