@@ -1,114 +1,305 @@
-# services/ai_service.py
+# services/youtube_service.py
 import os
-import asyncio
+import json
 import logging
-import socket
-from typing import Optional
+import tempfile
+import time
+from typing import Optional, Dict, Any, TYPE_CHECKING
+from datetime import datetime
+import asyncio
 
-import aiohttp
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
+if TYPE_CHECKING:
+    # only imported for type checking / IDE hints; not at runtime to avoid circular imports
+    from services.ai_service import AIService
+
+# configure basic logging only if not configured elsewhere
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
 
-DEFAULT_OPENROUTER_BASE = "https://api.openrouter.ai"
-OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+class Config:
+    """Configuration class"""
+    def __init__(self):
+        # YouTube settings
+        self.client_secrets_file = None
+        self.token_file = None
+        self.video_id = os.getenv("YOUTUBE_VIDEO_ID", "")
+        self.poll_interval = int(os.getenv("POLL_INTERVAL", "5"))
+        self.bot_name = os.getenv("BOT_NAME", "Rukiya")
+
+        # AI settings
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self.ai_cooldown = int(os.getenv("AI_COOLDOWN", "10"))
+        self.max_message_length = int(os.getenv("MAX_MESSAGE_LENGTH", "200"))
+
+        # Bot behavior
+        self.ai_triggers = ["rukiya", "bot", "hey rukiya", "@rukiya"]
+        self.bot_users = ["rukiya", self.bot_name.lower()]
+        self.banned_words = []  # Add words to filter
+
+    def update_from_obj(self, obj: Any):
+        for k, v in vars(obj).items():
+            setattr(self, k, v)
 
 
-class AIService:
-    def __init__(self, *, base_url: Optional[str] = None, api_key: Optional[str] = None, session: aiohttp.ClientSession = None):
-        self.base_url = (base_url or os.environ.get("OPENROUTER_BASE") or DEFAULT_OPENROUTER_BASE).rstrip("/")
-        self.api_key = api_key or os.environ.get(OPENROUTER_API_KEY_ENV)
-        self._session = session
-        if not self.api_key:
-            logger.warning("OPENROUTER_API_KEY not set; OpenRouter calls will fail")
+class YouTubeService:
+    """Handles YouTube API operations
 
-    async def _get_session(self):
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+    Important: Do NOT import AIService at module import time here — pass an AI service
+    instance into any higher-level runner that needs both services. This avoids circular imports.
+    """
 
-    async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
+    def __init__(self, config: Config):
+        self.config = config
+        self.youtube = None
+        self._setup_credentials()
 
-    async def generate_response(self, prompt: str, model: str = "deepseek_r1", max_tokens: int = 300, temperature: float = 0.8) -> Optional[str]:
-        """
-        Call OpenRouter chat completions with retries and robust DNS error handling.
-        Returns string or None.
-        """
-        url = f"{self.base_url}/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-
-        # quick debug: show host we will attempt
+    def _validate_json_string(self, json_string: str, var_name: str) -> Optional[dict]:
         try:
-            host = self.base_url.split("//")[-1].split("/")[0]
-            logger.debug(f"OpenRouter base host: {host}")
-        except Exception:
-            host = None
+            if not json_string or not json_string.strip():
+                logger.warning(f"{var_name} is empty or not set")
+                return None
 
-        # retries with exponential backoff
-        max_attempts = 4
-        backoff = 1.0
-        for attempt in range(1, max_attempts + 1):
-            try:
-                session = await self._get_session()
-                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                    text = await resp.text()
-                    if resp.status != 200:
-                        logger.error(f"OpenRouter API returned HTTP {resp.status}: {text}")
-                        return None
-                    data = await resp.json()
-                    # extract content robustly
-                    content = None
-                    try:
-                        content = data.get("choices", [])[0].get("message", {}).get("content")
-                    except Exception:
-                        content = None
-                    if not content:
-                        # fallback patterns
-                        content = (data.get("output") or [{}])[0].get("content", [{}])[0].get("text") if data.get("output") else None
-                    if content:
-                        return content.strip()
-                    logger.error("OpenRouter response missing content field")
-                    return None
+            clean_string = json_string.strip()
 
-            except aiohttp.ClientConnectorError as e:
-                # typical when DNS fails or connection refused
-                logger.warning(f"OpenRouter network error (attempt {attempt}): {e}")
-                # If underlying socket error present, log errno
-                if getattr(e, "__cause__", None):
-                    logger.debug(f"Underlying error cause: {e.__cause__}")
-            except (socket.gaierror, OSError) as e:
-                # socket.gaierror errno -2 -> Name or service not known
-                logger.warning(f"OpenRouter socket/DNS error (attempt {attempt}): {e} (errno={getattr(e, 'errno', None)})")
-            except asyncio.TimeoutError:
-                logger.warning(f"OpenRouter request timed out (attempt {attempt})")
-            except Exception as e:
-                logger.exception(f"Unexpected error contacting OpenRouter (attempt {attempt}): {e}")
+            if clean_string.startswith('\ufeff'):
+                clean_string = clean_string[1:]
+                logger.info(f"Removed BOM from {var_name}")
 
-            # If not last attempt, sleep with backoff
-            if attempt < max_attempts:
-                await asyncio.sleep(backoff)
-                backoff *= 2
+            parsed = json.loads(clean_string)
+            logger.info(f"✅ {var_name} parsed successfully")
+            return parsed
 
-        # final failure
-        logger.error("OpenRouter generate_response failed after retries. Check DNS/network/OPENROUTER_BASE and OPENROUTER_API_KEY.")
-        # extra diagnostic: try to resolve host synchronously (helpful in logs)
-        if host:
-            try:
-                ip = socket.gethostbyname(host)
-                logger.info(f"Resolved {host} -> {ip}")
-            except Exception as e:
-                logger.warning(f"Could not resolve {host}: {e}")
-        return None
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ JSON parsing failed for {var_name}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Unexpected error parsing {var_name}: {e}")
+            return None
+
+    def _setup_credentials(self):
+        try:
+            temp_dir = tempfile.gettempdir()
+            self.config.client_secrets_file = os.path.join(temp_dir, "client_secret.json")
+            self.config.token_file = os.path.join(temp_dir, "token.json")
+
+            logger.info(f"Using temp directory: {temp_dir}")
+
+            client_secret_json = os.getenv("CLIENT_SECRET_JSON")
+            if client_secret_json:
+                parsed_secret = self._validate_json_string(client_secret_json, "CLIENT_SECRET_JSON")
+                if parsed_secret:
+                    with open(self.config.client_secrets_file, "w") as f:
+                        json.dump(parsed_secret, f, indent=2)
+                    logger.info("✅ Client secrets written")
+
+            token_json = os.getenv("TOKEN_JSON")
+            if token_json:
+                parsed_token = self._validate_json_string(token_json, "TOKEN_JSON")
+                if parsed_token:
+                    with open(self.config.token_file, "w") as f:
+                        json.dump(parsed_token, f, indent=2)
+                    logger.info("✅ Token written")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to setup credentials: {e}")
+
+    def authenticate(self) -> bool:
+        """Authenticate with YouTube API (blocking). Call via thread from async code if needed."""
+        try:
+            if not os.path.exists(self.config.client_secrets_file):
+                logger.error("❌ Client secrets file not found")
+                return False
+
+            if not os.path.exists(self.config.token_file):
+                logger.error("❌ Token file not found")
+                return False
+
+            with open(self.config.token_file, "r") as f:
+                token_data = json.load(f)
+            creds = Credentials.from_authorized_user_info(token_data)
+            logger.info("✅ Loaded credentials")
+
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    logger.info("🔄 Refreshing token...")
+                    creds.refresh(Request())
+                    with open(self.config.token_file, "w") as f:
+                        f.write(creds.to_json())
+                    logger.info("✅ Token refreshed")
+                else:
+                    logger.error("❌ Invalid credentials")
+                    return False
+
+            self.youtube = build("youtube", "v3", credentials=creds)
+            logger.info("✅ YouTube authenticated")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Authentication failed: {e}")
+            return False
+
+    def get_live_chat_id(self, video_id: str) -> Optional[str]:
+        try:
+            response = self.youtube.videos().list(
+                part="liveStreamingDetails",
+                id=video_id
+            ).execute()
+
+            if not response.get("items"):
+                logger.warning(f"No video found for ID: {video_id}")
+                return None
+
+            live_details = response["items"][0].get("liveStreamingDetails", {})
+            chat_id = live_details.get("activeLiveChatId")
+
+            if chat_id:
+                logger.info(f"Found live chat ID: {chat_id}")
+            else:
+                logger.warning(f"No active live chat for video: {video_id}")
+
+            return chat_id
+
+        except Exception as e:
+            logger.error(f"Failed to get live chat ID: {e}")
+            return None
+
+    def get_chat_messages(self, live_chat_id: str, page_token: Optional[str] = None) -> Dict[str, Any]:
+        """Blocking call to fetch chat messages; run from thread when used in async context."""
+        try:
+            request = self.youtube.liveChatMessages().list(
+                liveChatId=live_chat_id,
+                part="snippet,authorDetails",
+                pageToken=page_token
+            )
+            return request.execute()
+
+        except Exception as e:
+            logger.error(f"Failed to get chat messages: {e}")
+            return {}
+
+    def send_message(self, live_chat_id: str, message: str) -> bool:
+        """Blocking call to send a message; run via thread in async context."""
+        try:
+            message_body = {
+                "snippet": {
+                    "liveChatId": live_chat_id,
+                    "type": "textMessageEvent",
+                    "textMessageDetails": {
+                        "messageText": message
+                    }
+                }
+            }
+            self.youtube.liveChatMessages().insert(
+                part="snippet",
+                body=message_body
+            ).execute()
+            logger.info(f"✅ Message sent: {message[:50]}...")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send message: {e}")
+            logger.error(f"Message was: {message}")
+            return False
+
+
+class ChatBot:
+    """Async-friendly ChatBot wrapper to run the polling loop without blocking."""
+
+    def __init__(self, youtube_service: YouTubeService, ai_service, config: Config):
+        # Note: ai_service type is left generic to avoid import-time dependency
+        self.youtube = youtube_service
+        self.ai = ai_service
+        self.config = config
+        self.processed_messages: set = set()
+        self.live_chat_id: Optional[str] = None
+        self.next_page_token: Optional[str] = None
+        self.running = False
+        self._task: Optional[asyncio.Task] = None
+
+    async def _process_once(self) -> None:
+        """One iteration of processing (non-blocking)."""
+        if not self.running:
+            return
+
+        try:
+            response = await asyncio.to_thread(
+                self.youtube.get_chat_messages,
+                self.live_chat_id,
+                self.next_page_token
+            )
+
+            if not response:
+                return
+
+            self.next_page_token = response.get("nextPageToken")
+            messages = response.get("items", [])
+
+            for message in messages:
+                try:
+                    snippet = message.get("snippet", {})
+                    author_details = message.get("authorDetails", {})
+                    message_text = snippet.get("displayMessage", "")
+                    author_name = author_details.get("displayName", "Unknown")
+                    message_id = message.get("id", "")
+
+                    if not message_text or message_id in self.processed_messages:
+                        continue
+
+                    self.processed_messages.add(message_id)
+
+                    logger.info(f"📨 Message from {author_name}: {message_text}")
+
+                    # AI response (await the async AI)
+                    ai_response = await self.ai.generate_response(message_text, author_name)
+                    if ai_response:
+                        # send message in thread
+                        success = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, ai_response)
+                        if not success:
+                            logger.error("❌ Failed to send AI response")
+
+                except Exception as e:
+                    logger.error(f"Error processing a message: {e}")
+
+        except Exception as e:
+            logger.error(f"Error during _process_once: {e}")
+
+    async def run_async(self, video_id: str):
+        """Start the async run loop. Call this with asyncio.create_task or await it."""
+        try:
+            self.live_chat_id = await asyncio.to_thread(self.youtube.get_live_chat_id, video_id)
+            if not self.live_chat_id:
+                logger.error("❌ Could not get live chat ID. Is the stream live?")
+                return False
+
+            self.running = True
+            logger.info(f"✅ Monitoring chat: {self.live_chat_id}")
+
+            while self.running:
+                await self._process_once()
+                await asyncio.sleep(self.config.poll_interval)
+
+            logger.info("✅ Chat bot stopped")
+            return True
+
+        except asyncio.CancelledError:
+            logger.info("Run loop cancelled")
+            self.running = False
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error in run_async: {e}")
+            self.running = False
+            return False
+
+    def stop(self):
+        """Stop the async loop at next tick."""
+        self.running = False
+        logger.info("🛑 Stopping chat bot...")
