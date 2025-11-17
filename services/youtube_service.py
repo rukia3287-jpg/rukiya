@@ -298,7 +298,19 @@ class ChatBot:
             logger.error(f"❌ Error in run_async: {e}")
             self.running = False
             return False
+# Put this anywhere in AIService class:
+async def debug_dns(self):
+    import socket
+    host = self.base_url.split("//")[-1].split("/")[0]
+    try:
+        ip = socket.gethostbyname(host)
+        logger.warning(f"DNS DEBUG: {host} resolved to {ip}")
+        return ip
+    except Exception as e:
+        logger.error(f"DNS DEBUG: failed to resolve {host}: {e}")
+        return None
 
+    
     def stop(self):
         """Stop the async loop at next tick."""
         self.running = False
