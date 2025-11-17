@@ -1,4 +1,3 @@
-# cogs/utility_commands.py
 import time
 import logging
 
@@ -9,7 +8,7 @@ from discord.ext import commands
 logger = logging.getLogger(__name__)
 
 class Utility(commands.Cog):
-    """Small utility commands like ping and uptime"""
+    """Utility commands"""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -18,13 +17,16 @@ class Utility(commands.Cog):
     @app_commands.command(name="ping", description="Check bot latency")
     async def ping(self, interaction: discord.Interaction):
         try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
         except Exception:
-            pass
+            return
 
         latency_ms = round(self.bot.latency * 1000) if hasattr(self.bot, "latency") else 0
-        embed = discord.Embed(title="Pong!", description=f"Latency: {latency_ms} ms", color=discord.Color.orange())
+        embed = discord.Embed(
+            title="🏓 Pong!", 
+            description=f"Latency: {latency_ms} ms", 
+            color=discord.Color.green()
+        )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="uptime", description="Show bot uptime")
@@ -32,13 +34,19 @@ class Utility(commands.Cog):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
-            pass
+            return
 
         uptime_s = time.time() - self.start_time
         hours = int(uptime_s // 3600)
         minutes = int((uptime_s % 3600) // 60)
         seconds = int(uptime_s % 60)
-        await interaction.followup.send(f"Uptime: {hours}h {minutes}m {seconds}s", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="⏱️ Bot Uptime",
+            description=f"{hours}h {minutes}m {seconds}s",
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
