@@ -1,22 +1,13 @@
 # services/chat_monitor.py
 import asyncio
 import logging
-from typing import Optional, Callable, List, Dict, Any
+from typing import Optional, Callable, List, Any, Awaitable
 
 logger = logging.getLogger(__name__)
 
 
 class ChatMonitor:
-    """
-    Monitors YouTube chat with a pub-sub pattern (async-friendly) and exposes
-    a non-blocking send_chat_message wrapper around the injected youtube service.
-
-    Expectations about injected services:
-      - youtube.get_chat_messages(live_chat_id, page_token) -> dict (blocking)
-      - youtube.send_message(live_chat_id, text) -> truthy on success (blocking)
-      - ai.generate_response(message, author) -> str or None (async)
-      - ai.get_cooldown_remaining() optional
-    """
+    """Monitors YouTube chat with pub-sub pattern (async-friendly)."""
 
     def __init__(self, youtube_service, ai_service, config: Optional[dict] = None):
         self.youtube = youtube_service
@@ -28,42 +19,45 @@ class ChatMonitor:
         self.video_id: Optional[str] = None
         self.processed_messages = set()
 
-        # Pub-sub: subscribers are async callbacks like `async def cb(message, author)`
-        self.subscribers: List[Callable[[str, str], Any]] = []
+        # Pub-sub pattern for message subscribers. Callbacks should be async: async def cb(msg, author)
+        self.subscribers: List[Callable[[str, str], Awaitable[Any]]] = []
 
         # Background loop control
         self._monitor_task: Optional[asyncio.Task] = None
-        self._poll_interval = float(self.config.get("poll_interval", 2.0))  # seconds between polls
-        self._send_cooldown = float(self.config.get("send_cooldown", 2.0))  # seconds between sent messages
+        self._poll_interval = float(self.config.get("poll_interval", 2.0))
+        self._send_cooldown = float(self.config.get("send_cooldown", 2.0))
 
     # -----------------------
     # Subscription management
     # -----------------------
-    def subscribe(self, callback: Callable):
+    def subscribe(self, callback: Callable[[str, str], Awaitable[Any]]):
         """Subscribe to chat messages (callback should be async: async def cb(msg, author))."""
         if callback not in self.subscribers:
             self.subscribers.append(callback)
-            logger.info(f"New subscriber added: {getattr(callback, '__name__', repr(callback))")
+            name = getattr(callback, "__name__", repr(callback))
+            logger.info(f"New subscriber added: {name}")
 
-    def unsubscribe(self, callback: Callable):
+    def unsubscribe(self, callback: Callable[[str, str], Awaitable[Any]]):
         if callback in self.subscribers:
             self.subscribers.remove(callback)
-            logger.info(f"Subscriber removed: {getattr(callback, '__name__', repr(callback))}")
+            name = getattr(callback, "__name__", repr(callback))
+            logger.info(f"Subscriber removed: {name}")
 
     async def _notify_subscribers(self, message: str, author: str):
         for callback in list(self.subscribers):
             try:
                 await callback(message, author)
             except Exception as e:
-                logger.error(f"Error in subscriber {getattr(callback,'__name__', repr(callback))}: {e}")
+                name = getattr(callback, "__name__", repr(callback))
+                logger.error(f"Error in subscriber {name}: {e}")
 
     # -----------------------
     # Monitoring control
     # -----------------------
-    def start_monitoring(self, live_chat_id: str, video_id: str = None, *, start_background: bool = True):
+    def start_monitoring(self, live_chat_id: str, video_id: Optional[str] = None, *, start_background: bool = True):
         """
         Begin monitoring a live chat. If start_background is True, spawn a background task
-        that runs process_messages in a loop.
+        that runs the monitor loop.
         """
         self.live_chat_id = live_chat_id
         self.video_id = video_id
@@ -73,10 +67,18 @@ class ChatMonitor:
         logger.info(f"Started monitoring chat: {live_chat_id}")
 
         if start_background:
-            if not self._monitor_task or self._monitor_task.done():
-                loop = asyncio.get_event_loop()
-                self._monitor_task = loop.create_task(self._monitor_loop())
-                logger.info("Background monitor loop started")
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop (e.g., called from sync context) - create a loop-compatible task later
+                loop = None
+
+            if loop:
+                if not self._monitor_task or self._monitor_task.done():
+                    self._monitor_task = loop.create_task(self._monitor_loop())
+                    logger.info("Background monitor loop started")
+            else:
+                logger.warning("No running asyncio loop - background monitoring not started")
 
     def stop_monitoring(self):
         """Stop monitoring and cancel background task if present."""
@@ -99,7 +101,7 @@ class ChatMonitor:
             "video_id": self.video_id,
             "processed_count": len(self.processed_messages),
             "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
-            "subscribers_count": len(self.subscribers)
+            "subscribers_count": len(self.subscribers),
         }
 
     # -----------------------
@@ -119,13 +121,13 @@ class ChatMonitor:
             return False
 
         try:
-            # youtube.send_message is potentially blocking -> run in thread
+            # youtube.send_message is likely blocking -> run in a thread
             result = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, text)
             if result:
                 logger.info("Sent chat message via youtube service")
             else:
                 logger.warning("youtube.send_message returned falsy result")
-            # small cooldown to avoid hitting immediate rate limits
+            # small cooldown to avoid rapid-fire sending
             await asyncio.sleep(self._send_cooldown)
             return bool(result)
         except Exception as exc:
@@ -147,7 +149,7 @@ class ChatMonitor:
                 return True
             attempt += 1
             if attempt < max_attempts:
-                logger.warning(f"send_chat_message failed — retrying {attempt}/{retries} after {retry_delay}s")
+                logger.warning(f"send_chat_message failed; retrying {attempt}/{retries} after {retry_delay}s")
                 await asyncio.sleep(retry_delay)
         logger.error("send_chat_message_with_retry exhausted attempts and failed")
         return False
@@ -158,8 +160,7 @@ class ChatMonitor:
     async def process_messages(self):
         """
         One-shot: poll YouTube messages, notify subscribers, generate AI responses,
-        and send responses back through youtube service. This method is safe to call
-        repeatedly from a loop or directly from tests.
+        and send responses back through youtube service. Safe to call repeatedly.
         """
         if not self.is_running or not self.live_chat_id:
             return
@@ -169,7 +170,7 @@ class ChatMonitor:
             response = await asyncio.to_thread(
                 self.youtube.get_chat_messages,
                 self.live_chat_id,
-                self.next_page_token
+                self.next_page_token,
             )
 
             if not response:
@@ -192,9 +193,10 @@ class ChatMonitor:
                 # Notify subscribers (welcome messages, logging, etc.)
                 await self._notify_subscribers(message, author)
 
-                # Generate AI response (AI service should be async)
+                # Generate AI response (AI service expected to be async)
                 ai_response = None
                 try:
+                    # if ai.generate_response is blocking, it should be wrapped by the ai implementation
                     ai_response = await self.ai.generate_response(message, author)
                 except Exception as e:
                     logger.error(f"AI generation error for message {message_id}: {e}")
@@ -210,11 +212,11 @@ class ChatMonitor:
                 logger.info(f"Processed and responded to {messages_processed} messages")
 
         except asyncio.CancelledError:
-            # propagate cancellation for clean shutdown
+            # allow task cancellation to propagate for graceful shutdown
             raise
         except Exception as e:
             logger.exception(f"Error processing messages: {e}")
-            # If the live chat ended, stop monitoring
+            # If the live chat ended, stop monitoring (best-effort detection)
             if "livechatid" in str(e).lower() and "not found" in str(e).lower():
                 logger.warning("Live chat ended, stopping monitoring")
                 self.stop_monitoring()
@@ -233,5 +235,4 @@ class ChatMonitor:
             return
         except Exception as e:
             logger.exception(f"Unexpected error in monitor loop: {e}")
-            # keep monitor alive? stop to be safe
             self.stop_monitoring()
