@@ -1,43 +1,92 @@
 # services/chat_monitor.py
+"""
+Robust ChatMonitor for YouTube chat.
+
+Features:
+- Accepts config as dict or object with attributes (or None).
+- Non-blocking send_chat_message wrapper that uses asyncio.to_thread
+  to call blocking youtube service methods.
+- Optional background monitor loop.
+- Pub-sub style subscribers (async callbacks).
+- Safe logging and basic retry on sending.
+
+Expectations about injected services:
+- youtube.get_chat_messages(live_chat_id, page_token) -> dict (blocking)
+- youtube.send_message(live_chat_id, text) -> truthy on success (blocking)
+- ai.generate_response(message, author) -> str or None (async preferred)
+- ai.get_cooldown_remaining() optional
+"""
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Optional, Callable, List, Any, Awaitable
+from typing import Optional, Callable, List, Any, Awaitable, Union
 
 logger = logging.getLogger(__name__)
 
 
-class ChatMonitor:
-    """Monitors YouTube chat with pub-sub pattern (async-friendly)."""
+ConfigType = Union[dict, object, None]
+SubscriberType = Callable[[str, str], Awaitable[Any]]
 
-    def __init__(self, youtube_service, ai_service, config: Optional[dict] = None):
+
+class ChatMonitor:
+    """Monitors YouTube chat with a pub-sub pattern and safe config handling."""
+
+    def __init__(self, youtube_service, ai_service, config: ConfigType = None):
         self.youtube = youtube_service
         self.ai = ai_service
-        self.config = config or {}
+        self.config = config
         self.is_running = False
         self.live_chat_id: Optional[str] = None
         self.next_page_token: Optional[str] = None
         self.video_id: Optional[str] = None
         self.processed_messages = set()
 
-        # Pub-sub pattern for message subscribers. Callbacks should be async: async def cb(msg, author)
-        self.subscribers: List[Callable[[str, str], Awaitable[Any]]] = []
+        # Pub-sub: subscribers are async callbacks like `async def cb(message, author)`
+        self.subscribers: List[SubscriberType] = []
 
         # Background loop control
         self._monitor_task: Optional[asyncio.Task] = None
-        self._poll_interval = float(self.config.get("poll_interval", 2.0))
-        self._send_cooldown = float(self.config.get("send_cooldown", 2.0))
+
+        # Safe config retrieval with defaults
+        self._poll_interval = float(self._cfg("poll_interval", 2.0))
+        self._send_cooldown = float(self._cfg("send_cooldown", 2.0))
+
+    # -----------------------
+    # Internal config helper
+    # -----------------------
+    def _cfg(self, key: str, default: Any = None) -> Any:
+        """
+        Safe config getter that supports:
+          - config as dict
+          - config as object with attributes
+          - None (uses default)
+        """
+        cfg = self.config
+        if cfg is None:
+            return default
+
+        # dict-like
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+
+        # object-like: use getattr, fallback to default
+        try:
+            return getattr(cfg, key, default)
+        except Exception:
+            return default
 
     # -----------------------
     # Subscription management
     # -----------------------
-    def subscribe(self, callback: Callable[[str, str], Awaitable[Any]]):
+    def subscribe(self, callback: SubscriberType):
         """Subscribe to chat messages (callback should be async: async def cb(msg, author))."""
         if callback not in self.subscribers:
             self.subscribers.append(callback)
             name = getattr(callback, "__name__", repr(callback))
             logger.info(f"New subscriber added: {name}")
 
-    def unsubscribe(self, callback: Callable[[str, str], Awaitable[Any]]):
+    def unsubscribe(self, callback: SubscriberType):
         if callback in self.subscribers:
             self.subscribers.remove(callback)
             name = getattr(callback, "__name__", repr(callback))
@@ -70,7 +119,7 @@ class ChatMonitor:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # No running loop (e.g., called from sync context) - create a loop-compatible task later
+                # No running loop (e.g., called from sync context)
                 loop = None
 
             if loop:
@@ -196,7 +245,7 @@ class ChatMonitor:
                 # Generate AI response (AI service expected to be async)
                 ai_response = None
                 try:
-                    # if ai.generate_response is blocking, it should be wrapped by the ai implementation
+                    # If ai.generate_response is blocking, handle that in your AI wrapper.
                     ai_response = await self.ai.generate_response(message, author)
                 except Exception as e:
                     logger.error(f"AI generation error for message {message_id}: {e}")
