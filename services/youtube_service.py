@@ -3,18 +3,15 @@ import os
 import json
 import logging
 import tempfile
-import time
-from typing import Optional, Dict, Any, TYPE_CHECKING
-from datetime import datetime
+from typing import Optional, Dict, Any
 import asyncio
 
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
-if TYPE_CHECKING:
-    # only imported for type checking / IDE hints; not at runtime to avoid circular imports
-    from services.ai_service import AIService
+# Import Config from the centralized location
+from services.config import Config
 
 # configure basic logging only if not configured elsewhere
 logger = logging.getLogger(__name__)
@@ -23,31 +20,6 @@ if not logger.handlers:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
-
-
-class Config:
-    """Configuration class"""
-    def __init__(self):
-        # YouTube settings
-        self.client_secrets_file = None
-        self.token_file = None
-        self.video_id = os.getenv("YOUTUBE_VIDEO_ID", "")
-        self.poll_interval = int(os.getenv("POLL_INTERVAL", "5"))
-        self.bot_name = os.getenv("BOT_NAME", "Rukiya")
-
-        # AI settings
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.ai_cooldown = int(os.getenv("AI_COOLDOWN", "10"))
-        self.max_message_length = int(os.getenv("MAX_MESSAGE_LENGTH", "200"))
-
-        # Bot behavior
-        self.ai_triggers = ["rukiya", "bot", "hey rukiya", "@rukiya"]
-        self.bot_users = ["rukiya", self.bot_name.lower()]
-        self.banned_words = []  # Add words to filter
-
-    def update_from_obj(self, obj: Any):
-        for k, v in vars(obj).items():
-            setattr(self, k, v)
 
 
 class YouTubeService:
@@ -298,19 +270,7 @@ class ChatBot:
             logger.error(f"❌ Error in run_async: {e}")
             self.running = False
             return False
-# Put this anywhere in AIService class:
-async def debug_dns(self):
-    import socket
-    host = self.base_url.split("//")[-1].split("/")[0]
-    try:
-        ip = socket.gethostbyname(host)
-        logger.warning(f"DNS DEBUG: {host} resolved to {ip}")
-        return ip
-    except Exception as e:
-        logger.error(f"DNS DEBUG: failed to resolve {host}: {e}")
-        return None
 
-    
     def stop(self):
         """Stop the async loop at next tick."""
         self.running = False
