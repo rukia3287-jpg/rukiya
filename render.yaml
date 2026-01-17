@@ -10,7 +10,9 @@ services:
   envVars:
     - key: DISCORD_TOKEN
       sync: false
-    - key: GEMINI_API_KEY
+    - key: OPENROUTER_API_KEY
+      sync: false
+    - key: OPENROUTER_MODEL
       sync: false
     - key: CLIENT_SECRET_JSON
       sync: false
