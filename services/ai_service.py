@@ -3,33 +3,14 @@ import os
 import time
 import asyncio
 import logging
-from typing import Optional, Iterable
-from dataclasses import dataclass
+from typing import Optional
 
 import httpx
-import discord
-from discord.ext import commands
-from discord import app_commands
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-# -----------------------------
-# Simple config dataclass
-# -----------------------------
-@dataclass
-class BotConfig:
-    ai_cooldown: float = 10.0
-    max_message_length: int = 200
-    bot_users: Iterable[str] = ()
-    banned_words: Iterable[str] = ()
-    ai_triggers: Iterable[str] = ("rukiya", "hey rukiya", "@rukiya")
-
-
-# -----------------------------
-# AIService: OpenRouter-only
-# -----------------------------
 class AIService:
     """OpenRouter-only async AI service.
 
@@ -40,14 +21,15 @@ class AIService:
       - ai_service.get_cooldown_remaining()
     """
 
-    def __init__(self, config: BotConfig):
+    def __init__(self, config):
+        """Initialize with config object (can be Config from services/config.py or any object with required attrs)"""
         self.config = config
         self.last_used = 0.0
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
         if not self.openrouter_key:
             logger.error("OPENROUTER_API_KEY not set. AIService disabled.")
-        self.model = os.getenv("OPENROUTER_MODEL", "gpt-3.5-turbo")
-        self.endpoint = os.getenv("OPENROUTER_ENDPOINT", "https://api.openrouter.ai/v1/chat/completions")
+        self.model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-r1")
+        self.endpoint = os.getenv("OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions")
 
     def can_respond(self) -> bool:
         return time.time() - self.last_used > float(getattr(self.config, "ai_cooldown", 0))
@@ -77,6 +59,8 @@ class AIService:
         headers = {
             "Authorization": f"Bearer {self.openrouter_key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/yourusername/rukiya-bot",
+            "X-Title": "Rukiya Discord Bot"
         }
 
         payload = {
@@ -178,45 +162,3 @@ class AIService:
     def get_cooldown_remaining(self) -> float:
         elapsed = time.time() - self.last_used
         return max(0.0, float(getattr(self.config, "ai_cooldown", 0)) - elapsed)
-
-
-# -----------------------------
-# Example Discord Cog using AIService
-# -----------------------------
-class YouTubeCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, ai_service: AIService):
-        self.bot = bot
-        self.ai_service = ai_service
-
-    @app_commands.command(name="start", description="Start monitoring (example)")
-    async def start_monitoring(self, interaction: discord.Interaction) -> None:
-        # Defer immediately so token stays valid while we do work.
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(thinking=True)
-        except discord.NotFound:
-            # The interaction expired before we could defer.
-            logger.warning("Interaction expired before defer could be sent.")
-            # Best-effort: proceed and try to send followup later.
-        except Exception:
-            logger.exception("Failed to defer interaction")
-
-        # Example input - in real code you would collect real text
-        # For demonstration we use a sample message and author.
-        sample_message = "hello rukiya, tell me something fun"
-        author_name = interaction.user.display_name if interaction.user else "unknown"
-
-        # Call AI (async, non-blocking)
-        ai_text = await self.ai_service.generate_response(sample_message, author_name)
-
-        # Send followup. This may still fail if the interaction fully expired; catch that.
-        try:
-            if ai_text:
-                await interaction.followup.send(ai_text)
-            else:
-                await interaction.followup.send("Sorry, cannot answer right now.")
-        except discord.NotFound:
-            logger.warning("Couldn't send followup - interaction fully expired.")
-        except Exception:
-            logger.exception("Failed to send followup")
-
