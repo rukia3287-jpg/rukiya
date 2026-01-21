@@ -1,0 +1,123 @@
+import os
+import json
+try:
+    from google_auth_oauthlib.flow import Flow
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+except ImportError as e:
+    print(f"Missing required packages. Install with:")
+    print("pip install google-auth-oauthlib google-auth google-oauth2-lib")
+    exit(1)
+
+SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
+CLIENT_SECRET_FILE = "client_secret.json"
+TOKEN_FILE = "token.json"
+
+
+def check_existing_credentials():
+    """Check if we already have valid credentials"""
+    if os.path.exists(TOKEN_FILE):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            if creds and creds.valid:
+                print("✅ Already authorized with valid credentials.")
+                return True
+            elif creds and creds.expired and creds.refresh_token:
+                print("🔄 Refreshing expired credentials...")
+                creds.refresh(Request())
+                save_credentials(creds)
+                print("✅ Credentials refreshed successfully.")
+                return True
+        except Exception as e:
+            print(f"⚠️ Error loading existing credentials: {e}")
+    return False
+
+
+def save_credentials(creds):
+    """Save credentials to file"""
+    try:
+        with open(TOKEN_FILE, "w") as token:
+            token.write(creds.to_json())
+        print(f"💾 Credentials saved to {TOKEN_FILE}")
+    except Exception as e:
+        print(f"❌ Error saving credentials: {e}")
+
+
+def authorize_new_credentials():
+    """Perform OAuth flow for new credentials"""
+    if not os.path.exists(CLIENT_SECRET_FILE):
+        print(f"❌ Client secret file '{CLIENT_SECRET_FILE}' not found!")
+        print(
+            "Please download it from Google Cloud Console and place it in the current directory."
+        )
+        return False
+
+    try:
+        # Create flow with explicit redirect URI for desktop apps
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRET_FILE,
+            scopes=SCOPES,
+            redirect_uri=
+            'urn:ietf:wg:oauth:2.0:oob'  # Changed from urn:ietf:wg:oauth:2.0:oob
+        )
+
+        # Generate authorization URL
+        auth_url, _ = flow.authorization_url(
+            prompt='consent',
+            access_type='offline',  # This ensures we get a refresh token
+            include_granted_scopes='true')
+
+        print("\n" + "=" * 60)
+        print("🔐 YOUTUBE API AUTHORIZATION")
+        print("=" * 60)
+        print("🔗 Please visit this URL to authorize the application:")
+        print(f"\n{auth_url}\n")
+        print("📋 After authorization, you'll be redirected to a page.")
+        print(
+            "🔑 Copy the authorization code from the URL or page and paste it below."
+        )
+        print("-" * 60)
+
+        # Use the provided authorization code
+        code = "4/1ASc3gC0Kbjd3OBIxX2_ICtomEyX3NXAln3a174P4MJ-7plerkJxJydH9xyA"
+        print(f"Using authorization code: {code[:20]}...")
+
+        # Exchange code for credentials
+        print("🔄 Exchanging authorization code for credentials...")
+        flow.fetch_token(code=code)
+
+        # Save credentials
+        creds = flow.credentials
+        save_credentials(creds)
+        print("✅ Authorization successful!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Authorization failed: {e}")
+        print("\nTroubleshooting tips:")
+        print("1. Make sure you copied the entire authorization code")
+        print("2. Check that your client_secret.json file is valid")
+        print(
+            "3. Ensure you have the correct OAuth 2.0 redirect URI configured")
+        return False
+
+
+def main():
+    print("🚀 Starting YouTube API Authentication...")
+
+    # Check if we already have valid credentials
+    if check_existing_credentials():
+        return
+
+    # Perform new authorization
+    print("\n🔐 Need to authorize application...")
+    success = authorize_new_credentials()
+
+    if success:
+        print("\n🎉 Setup complete! You can now use the YouTube API.")
+    else:
+        print("\n❌ Authorization failed. Please try again.")
+
+
+if __name__ == "__main__":
+    main()
