@@ -1,9 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/services/chat_monitor.py b/services/chat_monitor.py
-index f050559043ba66e50a0318df10ccfef3d440427e..f375409dee579e0efcaeaa73a9e2aa174aacae86 100644
---- a/services/chat_monitor.py
-+++ b/services/chat_monitor.py
-@@ -1,78 +1,86 @@
  # services/chat_monitor.py
  """
  Robust ChatMonitor for YouTube chat.
