@@ -7,6 +7,12 @@ import aiohttp
 import discord
 from discord.ext import commands
 
+from services.ai_service import (
+    build_rukiya_system_prompt,
+    detect_message_type,
+    validate_rukiya_response,
+)
+
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -136,16 +142,16 @@ class RukiyaCog(commands.Cog):
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": RUKIYA_SYSTEM_PROMPT},
+                {"role": "system", "content": build_rukiya_system_prompt(message, author)},
                 {
                     "role": "user",
                     "content": (
                         f"[Stream viewer '{author}' says]: {message}\n\n"
-                        "Reply as Rukiya — short, punchy, in-character. 1-3 sentences max."
+                        "Reply as Rukiya. Keep it short and natural."
                     ),
                 },
             ],
-            "max_tokens": self.max_tokens,
+            "max_tokens": min(self.max_tokens, 80),
             "temperature": self.temperature,
         }
 
@@ -162,13 +168,10 @@ class RukiyaCog(commands.Cog):
                     logger.error("OpenRouter response missing content")
                     return None
 
-                content = content.strip()
-                # Hard cap
-                if len(content) > 300:
-                    last = max(content.rfind("."), content.rfind("!"), content.rfind("?"))
-                    content = content[:last + 1] if last > 0 else content[:300] + "..."
-
-                return content
+                return validate_rukiya_response(
+                    content.strip(),
+                    detect_message_type(message),
+                )
 
         except asyncio.TimeoutError:
             logger.warning("OpenRouter request timed out")
