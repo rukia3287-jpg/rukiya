@@ -78,9 +78,11 @@ def authorize_new_credentials():
         )
         print("-" * 60)
 
-        # Use the provided authorization code
-        code = "4/1ASc3gC0Kbjd3OBIxX2_ICtomEyX3NXAln3a174P4MJ-7plerkJxJydH9xyA"
-        print(f"Using authorization code: {code[:20]}...")
+        # Prompt for the authorization code
+        code = input("Enter authorization code: ").strip()
+        if not code:
+            print("❌ Authorization code cannot be empty.")
+            return False
 
         # Exchange code for credentials
         print("🔄 Exchanging authorization code for credentials...")
