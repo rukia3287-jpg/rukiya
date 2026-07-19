@@ -85,9 +85,12 @@ class YouTubeCommands(commands.Cog):
             await interaction.followup.send("❌ Chat monitor missing.", ephemeral=True)
             return
 
+        yt = getattr(self.bot, "youtube_service", None)
         st = cm.get_status()
         embed = discord.Embed(title="YouTube Monitor Status", color=discord.Color.blue())
         embed.add_field(name="Running", value=str(st.get("is_running")), inline=True)
+        if yt:
+            embed.add_field(name="Auth Valid", value="✅ Yes" if yt.auth_valid else "❌ No", inline=True)
         embed.add_field(name="Video ID", value=st.get("video_id") or "N/A", inline=True)
         embed.add_field(name="Processed messages", value=str(st.get("processed_count")), inline=True)
         embed.add_field(name="AI cooldown remaining", value=f"{st.get('ai_cooldown_remaining'):.1f}s", inline=True)

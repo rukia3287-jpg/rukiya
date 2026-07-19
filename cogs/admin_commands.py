@@ -220,6 +220,9 @@ class AdminCommands(commands.Cog):
         embed.add_field(name="ai_service", value="✅ Present" if ai else "❌ Missing", inline=True)
         embed.add_field(name="youtube_service", value="✅ Present" if yt else "❌ Missing", inline=True)
 
+        if yt:
+            embed.add_field(name="YT Auth Status", value="🟢 Valid" if yt.auth_valid else "🔴 Invalid/Dead", inline=True)
+
         # Runtime state
         embed.add_field(name="YT Chat Running", value="🟢 Yes" if (cm and cm.is_running) else "🔴 No", inline=True)
         embed.add_field(name="Auto-responder", value="✅ Enabled" if rukiya_enabled else "❌ Disabled", inline=True)
