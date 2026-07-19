@@ -77,10 +77,22 @@ class RukiyaBot(commands.Bot):
 # ----- Render health server -----
 
 async def health_check(request):
-    return web.Response(text="Bot is running!", status=200)
+    bot = request.app.get('bot')
+    status_data = {
+        "status": "ok",
+        "message": "Bot is running!"
+    }
+    if bot and hasattr(bot, 'youtube_service'):
+        yt = bot.youtube_service
+        status_data["youtube_auth_valid"] = yt.auth_valid
+        if not yt.auth_valid:
+            status_data["status"] = "degraded"
+            status_data["message"] = "YouTube authentication is INVALID/DEAD. Manual re-auth required."
+    return web.json_response(status_data)
 
-async def start_web_server():
+async def start_web_server(bot):
     app = web.Application()
+    app['bot'] = bot
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
 
@@ -96,7 +108,7 @@ async def start_web_server():
 async def main():
     try:
         bot = RukiyaBot()
-        await start_web_server()
+        await start_web_server(bot)
         await bot.start(bot.config.discord_token)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
