@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import tempfile
+import time
 from typing import Optional, Dict, Any
 import asyncio
 
@@ -10,6 +11,7 @@ from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 
 # Import Config from the centralized location
 from services.config import Config
@@ -154,41 +156,99 @@ class YouTubeService:
 
     def get_chat_messages(self, live_chat_id: str, page_token: Optional[str] = None) -> Dict[str, Any]:
         """Blocking call to fetch chat messages; run from thread when used in async context."""
-        try:
-            request = self.youtube.liveChatMessages().list(
-                liveChatId=live_chat_id,
-                part="snippet,authorDetails",
-                pageToken=page_token
-            )
-            return request.execute()
-
-        except Exception as e:
-            logger.error(f"Failed to get chat messages: {e}")
+        if not self.auth_valid or self.youtube is None:
+            logger.error("❌ YouTube service not authenticated or invalid")
             return {}
+
+        attempts = 3
+        backoff_delays = [2, 4, 8]
+
+        for attempt in range(attempts):
+            try:
+                request = self.youtube.liveChatMessages().list(
+                    liveChatId=live_chat_id,
+                    part="snippet,authorDetails",
+                    pageToken=page_token
+                )
+                return request.execute()
+
+            except RefreshError as re:
+                logger.critical(f"❌ YouTube RefreshError: Refresh token is dead or revoked. Error: {re}")
+                self.auth_valid = False
+                break
+            except HttpError as he:
+                status = he.resp.status
+                if status in (401, 403):
+                    logger.error(f"❌ YouTube API Auth/Permission error (HTTP {status}): {he}")
+                    self.auth_valid = False
+                    break
+
+                logger.warning(f"⚠️ YouTube API transient error (HTTP {status}) on attempt {attempt + 1}/{attempts}: {he}")
+                if attempt < attempts - 1:
+                    time.sleep(backoff_delays[attempt])
+                else:
+                    logger.error(f"❌ Max attempts reached for HTTP transient error: {he}")
+            except Exception as e:
+                logger.warning(f"⚠️ YouTube API transient connection error on attempt {attempt + 1}/{attempts}: {e}")
+                if attempt < attempts - 1:
+                    time.sleep(backoff_delays[attempt])
+                else:
+                    logger.error(f"❌ Max attempts reached for transient error: {e}")
+
+        return {}
 
     def send_message(self, live_chat_id: str, message: str) -> bool:
         """Blocking call to send a message; run via thread in async context."""
-        try:
-            message_body = {
-                "snippet": {
-                    "liveChatId": live_chat_id,
-                    "type": "textMessageEvent",
-                    "textMessageDetails": {
-                        "messageText": message
-                    }
+        if not self.auth_valid or self.youtube is None:
+            logger.error("❌ YouTube service not authenticated or invalid")
+            return False
+
+        attempts = 3
+        backoff_delays = [2, 4, 8]
+        message_body = {
+            "snippet": {
+                "liveChatId": live_chat_id,
+                "type": "textMessageEvent",
+                "textMessageDetails": {
+                    "messageText": message
                 }
             }
-            self.youtube.liveChatMessages().insert(
-                part="snippet",
-                body=message_body
-            ).execute()
-            logger.info(f"✅ Message sent: {message[:50]}...")
-            return True
+        }
 
-        except Exception as e:
-            logger.error(f"❌ Failed to send message: {e}")
-            logger.error(f"Message was: {message}")
-            return False
+        for attempt in range(attempts):
+            try:
+                self.youtube.liveChatMessages().insert(
+                    part="snippet",
+                    body=message_body
+                ).execute()
+                logger.info(f"✅ Message sent: {message[:50]}...")
+                return True
+
+            except RefreshError as re:
+                logger.critical(f"❌ YouTube RefreshError: Refresh token is dead or revoked. Error: {re}")
+                self.auth_valid = False
+                break
+            except HttpError as he:
+                status = he.resp.status
+                if status in (401, 403):
+                    logger.error(f"❌ YouTube API Auth/Permission error (HTTP {status}): {he}")
+                    self.auth_valid = False
+                    break
+
+                logger.warning(f"⚠️ YouTube API transient error (HTTP {status}) on attempt {attempt + 1}/{attempts}: {he}")
+                if attempt < attempts - 1:
+                    time.sleep(backoff_delays[attempt])
+                else:
+                    logger.error(f"❌ Max attempts reached for HTTP transient error: {he}")
+            except Exception as e:
+                logger.warning(f"⚠️ YouTube API transient connection error on attempt {attempt + 1}/{attempts}: {e}")
+                if attempt < attempts - 1:
+                    time.sleep(backoff_delays[attempt])
+                else:
+                    logger.error(f"❌ Max attempts reached for transient error: {e}")
+
+        logger.error(f"Message was: {message}")
+        return False
 
 
 class ChatBot:
