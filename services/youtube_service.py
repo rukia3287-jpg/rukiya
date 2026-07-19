@@ -9,6 +9,7 @@ import asyncio
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.auth.exceptions import RefreshError
 
 # Import Config from the centralized location
 from services.config import Config
@@ -32,6 +33,7 @@ class YouTubeService:
     def __init__(self, config: Config):
         self.config = config
         self.youtube = None
+        self.auth_valid = False
         self._setup_credentials()
 
     def _validate_json_string(self, json_string: str, var_name: str) -> Optional[dict]:
@@ -113,10 +115,16 @@ class YouTubeService:
 
             self.youtube = build("youtube", "v3", credentials=creds)
             logger.info("✅ YouTube authenticated")
+            self.auth_valid = True
             return True
 
+        except RefreshError as re:
+            logger.critical("❌ CRITICAL: The YouTube API refresh token is dead or revoked. Manual re-authentication via create_token.txt is required. Error: %s", re)
+            self.auth_valid = False
+            return False
         except Exception as e:
             logger.error(f"❌ Authentication failed: {e}")
+            self.auth_valid = False
             return False
 
     def get_live_chat_id(self, video_id: str) -> Optional[str]:
