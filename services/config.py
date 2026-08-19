@@ -25,7 +25,7 @@ class Config:
     bot_name: str = "Rukiya"
     max_message_length: int = 250
     ai_cooldown: int = 5          # ⬇ lowered from 20 → 5s for live chat responsiveness
-    poll_interval: int = 3        # ⬇ poll more frequently
+    poll_interval: int = 10       # ⬆ set to 10s default to conserve YouTube API quota
     send_cooldown: float = 1.5
     chat_check_interval: int = 5
 

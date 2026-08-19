@@ -6,6 +6,7 @@ from typing import Optional
 import aiohttp
 import discord
 from discord.ext import commands
+from services.ai_service import RUKIYA_SYSTEM_PROMPT as SAFE_RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ SPEECH RULES:
 - Use emojis sparingly: ⚡🌸🗡️😤😒👀
 - NEVER sound like a generic chatbot. You're an anime character who's annoyed to be here but secretly loves it.
 """
+
+
+# Keep direct Discord commands subject to the same live-chat safety prompt.
+RUKIYA_SYSTEM_PROMPT = SAFE_RUKIYA_SYSTEM_PROMPT
 
 
 class RukiyaCog(commands.Cog):
@@ -162,7 +167,7 @@ class RukiyaCog(commands.Cog):
                     logger.error("OpenRouter response missing content")
                     return None
 
-                content = content.strip()
+                content = validate_rukiya_response(content.strip())
                 # Hard cap
                 if len(content) > 300:
                     last = max(content.rfind("."), content.rfind("!"), content.rfind("?"))

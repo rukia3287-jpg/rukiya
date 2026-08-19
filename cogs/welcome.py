@@ -47,7 +47,7 @@ class Welcome(commands.Cog):
                         logger.exception("AI generation for welcome failed")
 
                 try:
-                    await cm.send_chat_message(welcome_msg)
+                    await cm.send_chat_message(welcome_msg, message_kind="welcome")
                 except Exception:
                     logger.exception("Failed to send welcome to YouTube chat")
 
@@ -72,7 +72,7 @@ class Welcome(commands.Cog):
 
         if cm and cm.is_running:
             try:
-                ok = await cm.send_chat_message(text)
+                ok = await cm.send_chat_message(text, message_kind="welcome")
                 if ok:
                     await interaction.followup.send("✅ Welcome sent to YouTube chat.", ephemeral=True)
                     return

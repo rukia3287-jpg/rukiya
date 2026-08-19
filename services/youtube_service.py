@@ -9,6 +9,7 @@ import asyncio
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from googleapiclient.errors import HttpError
 
 # Import Config from the centralized location
 from services.config import Config
@@ -32,6 +33,11 @@ class YouTubeService:
     def __init__(self, config: Config):
         self.config = config
         self.youtube = None
+        # Deliberately process-lifetime: restarting monitoring must not reset it.
+        self._nonessential_insert_count = 0
+        self._nonessential_insert_cap = 60
+        self._nonessential_warning_at = 48
+        self._nonessential_warning_logged = False
         self._setup_credentials()
 
     def _validate_json_string(self, json_string: str, var_name: str) -> Optional[dict]:
@@ -154,12 +160,19 @@ class YouTubeService:
             )
             return request.execute()
 
+        except HttpError:
+            # Let ChatMonitor inspect quotaExceeded and stop without retrying.
+            raise
         except Exception as e:
             logger.error(f"Failed to get chat messages: {e}")
             return {}
 
-    def send_message(self, live_chat_id: str, message: str) -> bool:
+    def send_message(self, live_chat_id: str, message: str, *, message_kind: str = "reply") -> bool:
         """Blocking call to send a message; run via thread in async context."""
+        nonessential = message_kind in {"idle", "welcome"}
+        if nonessential and self._nonessential_insert_count >= self._nonessential_insert_cap:
+            logger.warning("Non-essential insert cap (%d) reached; suppressing %s message", self._nonessential_insert_cap, message_kind)
+            return False
         try:
             message_body = {
                 "snippet": {
@@ -174,6 +187,11 @@ class YouTubeService:
                 part="snippet",
                 body=message_body
             ).execute()
+            if nonessential:
+                self._nonessential_insert_count += 1
+                if self._nonessential_insert_count >= self._nonessential_warning_at and not self._nonessential_warning_logged:
+                    self._nonessential_warning_logged = True
+                    logger.warning("Non-essential insert usage is at 80%% of the %d-call cap", self._nonessential_insert_cap)
             logger.info(f"✅ Message sent: {message[:50]}...")
             return True
 
