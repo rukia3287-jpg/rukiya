@@ -1,10 +1,12 @@
 import os
+import re
 import asyncio
 import logging
 from typing import Optional
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 from services.ai_service import RUKIYA_SYSTEM_PROMPT as SAFE_RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
 
@@ -46,7 +48,7 @@ class RukiyaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.session: Optional[aiohttp.ClientSession] = None
-        self.enabled = False
+        self.enabled = os.environ.get("RUKIYA_AUTO_REPLY", "true").lower() in ("true", "1", "yes")
         self.model = os.environ.get("RUKIYA_MODEL", os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-r1"))
         self.openrouter_base = os.environ.get("OPENROUTER_BASE", DEFAULT_OPENROUTER_BASE)
         self.api_key = os.environ.get(OPENROUTER_API_KEY_ENV)
@@ -58,6 +60,9 @@ class RukiyaCog(commands.Cog):
         self.temperature = float(os.environ.get("RUKIYA_TEMP", "0.85"))
         self.cooldown_seconds = float(os.environ.get("RUKIYA_COOLDOWN", "3.0"))
         self._last_sent_at = 0.0
+        self._last_discord_reply_at = 0.0
+        self.discord_cooldown_seconds = float(os.environ.get("RUKIYA_DISCORD_COOLDOWN", "2.0"))
+        self._name_pattern = re.compile(r"\b(rukiya|rukia|ruki)\b", re.IGNORECASE)
 
     async def cog_load(self) -> None:
         self.session = aiohttp.ClientSession()
@@ -77,6 +82,66 @@ class RukiyaCog(commands.Cog):
                 pass
         if self.session and not self.session.closed:
             await self.session.close()
+
+    # ────────────────────────────────────────────
+    # Discord chat listener (reply when tagged or called by name)
+    # ────────────────────────────────────────────
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Reply when Rukiya is tagged or called by name in Discord."""
+        # Never reply to bots (prevents recursive loops)
+        if message.author.bot:
+            return
+
+        # Don't intercept command invocations
+        ctx = await self.bot.get_context(message)
+        if ctx.valid:
+            return
+
+        # Check if the bot is mentioned or tagged
+        bot_user = self.bot.user
+        is_tagged = False
+        if bot_user and (bot_user in message.mentions or f"<@{bot_user.id}>" in message.content or f"<@!{bot_user.id}>" in message.content):
+            is_tagged = True
+
+        # Check if called by name
+        is_named = bool(self._name_pattern.search(message.content))
+
+        if not (is_tagged or is_named):
+            return
+
+        # Cooldown check for Discord replies
+        now = asyncio.get_event_loop().time()
+        if now - self._last_discord_reply_at < self.discord_cooldown_seconds:
+            return
+
+        # Clean prompt by stripping bot mention tag
+        cleaned_text = message.content
+        if bot_user:
+            cleaned_text = cleaned_text.replace(f"<@{bot_user.id}>", "").replace(f"<@!{bot_user.id}>", "")
+        cleaned_text = cleaned_text.strip()
+        if not cleaned_text:
+            cleaned_text = "oi"
+
+        try:
+            async with message.channel.typing():
+                ai = getattr(self.bot, "ai_service", None)
+                reply = None
+                if ai:
+                    reply = await ai.generate_response(
+                        cleaned_text,
+                        message.author.display_name,
+                        bypass_trigger=True,
+                        bypass_cooldown=True
+                    )
+                if not reply:
+                    reply = await self.generate_reply(cleaned_text, author=message.author.display_name)
+
+                if reply:
+                    self._last_discord_reply_at = asyncio.get_event_loop().time()
+                    await message.reply(reply, mention_author=False)
+        except Exception as e:
+            logger.exception(f"Failed to reply to Discord message: {e}")
 
     # ────────────────────────────────────────────
     # YouTube chat callback
@@ -275,6 +340,124 @@ class RukiyaCog(commands.Cog):
         else:
             await ctx.send("❌ Failed to send to YouTube chat.")
 
+    # ────────────────────────────────────────────
+    # Slash Commands
+    # ────────────────────────────────────────────
+    @app_commands.command(name="ask", description="Ask Rukiya a question directly")
+    @app_commands.describe(
+        question="What do you want to ask Rukiya?",
+        post_to_yt="Also post Rukiya's reply to YouTube live chat if active (default: False)"
+    )
+    async def slash_ask(self, interaction: discord.Interaction, question: str, post_to_yt: bool = False):
+        """Ask Rukiya a question directly via slash command."""
+        try:
+            await interaction.response.defer(thinking=True)
+        except Exception:
+            pass
+
+        ai = getattr(self.bot, "ai_service", None)
+        reply = None
+        if ai:
+            reply = await ai.generate_response(
+                question,
+                interaction.user.display_name,
+                bypass_trigger=True,
+                bypass_cooldown=True
+            )
+        if not reply:
+            reply = await self.generate_reply(question, author=interaction.user.display_name)
+
+        if not reply:
+            await interaction.followup.send("❌ No response from model. Please check logs or API key.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🗡️ Rukiya says...",
+            description=reply,
+            color=discord.Color.dark_red()
+        )
+        embed.set_footer(text=f"Asked by {interaction.user.display_name}")
+
+        if post_to_yt:
+            cm = getattr(self.bot, "chat_monitor", None)
+            if cm and cm.is_running:
+                ok = await cm.send_chat_message(reply)
+                yt_status_msg = "\n\n*(✅ Posted to YouTube live chat)*" if ok else "\n\n*(❌ Failed to post to YouTube live chat)*"
+            else:
+                yt_status_msg = "\n\n*(⚠️ YouTube live chat is not active)*"
+            embed.description += yt_status_msg
+
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="say", description="Send a message to YouTube live chat as Rukiya")
+    @app_commands.describe(text="Message text to post in YouTube live chat")
+    async def slash_say(self, interaction: discord.Interaction, text: str):
+        """Send a message directly to YouTube live chat."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+        cm = getattr(self.bot, "chat_monitor", None)
+        if not cm or not cm.is_running:
+            await interaction.followup.send("❌ YouTube live chat is not currently running. Start monitoring with `/start <video_id>` first.", ephemeral=True)
+            return
+
+        ok = await cm.send_chat_message(text)
+        if ok:
+            await interaction.followup.send(f"✅ Sent to YouTube live chat: `{text[:100]}`", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Failed to send message to YouTube live chat.", ephemeral=True)
+
+    @app_commands.command(name="auto_reply", description="Check or toggle YouTube chat auto-replying")
+    @app_commands.describe(action="Action to perform: status, enable, or disable")
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Status (View current setting)", value="status"),
+        app_commands.Choice(name="Enable (Auto-respond to triggers)", value="enable"),
+        app_commands.Choice(name="Disable (Stop auto-responding)", value="disable"),
+    ])
+    async def slash_auto_reply(self, interaction: discord.Interaction, action: str = "status"):
+        """Manage auto-reply setting for YouTube live chat."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+        if action == "enable":
+            self.enabled = True
+            await interaction.followup.send("⚡ Rukiya auto-reply **enabled** for YouTube chat.", ephemeral=True)
+        elif action == "disable":
+            self.enabled = False
+            await interaction.followup.send("🛑 Rukiya auto-reply **disabled** for YouTube chat.", ephemeral=True)
+        else:
+            status_text = "✅ **Enabled**" if self.enabled else "❌ **Disabled**"
+            await interaction.followup.send(f"🗡️ YouTube chat auto-reply is currently: {status_text}", ephemeral=True)
+
+    @app_commands.command(name="rukiya_info", description="View Rukiya's character profile and system details")
+    async def slash_rukiya_info(self, interaction: discord.Interaction):
+        """Display information about Rukiya's character and active configuration."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="🗡️ Kuchiki Rukiya (朽木 ルキア)",
+            description=(
+                "Soul Reaper of the Gotei 13, Lieutenant of the Thirteenth Division.\n"
+                "Wielder of **Sode no Shirayuki** (袖白雪, *Sleeved White Snow*), the most beautiful Zanpakutō in the Soul Society.\n\n"
+                "**Personality**: Proud, sharp-tongued, tsundere, battle-hardened, with a secret soft side."
+            ),
+            color=discord.Color.dark_red()
+        )
+        embed.add_field(name="AI Model", value=f"`{self.model}`", inline=True)
+        embed.add_field(name="Auto-Reply", value="✅ Active" if self.enabled else "❌ Inactive", inline=True)
+        embed.add_field(name="Discord Cooldown", value=f"{self.discord_cooldown_seconds}s", inline=True)
+        embed.add_field(name="Chat Cooldown", value=f"{self.cooldown_seconds}s", inline=True)
+        embed.set_footer(text="Call my name or tag me anytime in chat! ❄️")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(RukiyaCog(bot))
+

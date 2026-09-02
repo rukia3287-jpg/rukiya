@@ -76,11 +76,11 @@ class AIService:
         cooldown = float(getattr(self.config, "ai_cooldown", 5))
         return time.time() - self.last_used > cooldown
 
-    def should_respond(self, message: str, author: str) -> bool:
+    def should_respond(self, message: str, author: str, bypass_trigger: bool = False, bypass_cooldown: bool = False) -> bool:
         """Decide whether to respond — flexible trigger matching."""
         if not self.openrouter_key:
             return False
-        if not self.can_respond():
+        if not bypass_cooldown and not self.can_respond():
             return False
 
         # Skip bot users
@@ -94,6 +94,9 @@ class AIService:
         banned = getattr(self.config, "banned_words", set())
         if any(w in msg_lower for w in banned):
             return False
+
+        if bypass_trigger:
+            return True
 
         # Flexible trigger check — partial match anywhere in message
         triggers = getattr(self.config, "ai_triggers", set())
@@ -170,10 +173,10 @@ class AIService:
 
         return None
 
-    async def generate_response(self, message: str, author: str) -> Optional[str]:
+    async def generate_response(self, message: str, author: str, bypass_trigger: bool = False, bypass_cooldown: bool = False) -> Optional[str]:
         """Public entry point — returns Rukiya's reply or None."""
         try:
-            if not self.should_respond(message, author):
+            if not self.should_respond(message, author, bypass_trigger=bypass_trigger, bypass_cooldown=bypass_cooldown):
                 return None
 
             raw = await self._call_openrouter(message, author, max_tokens=150)
@@ -182,7 +185,8 @@ class AIService:
 
             raw = validate_rukiya_response(raw)
             # Update cooldown on success
-            self.last_used = time.time()
+            if not bypass_cooldown:
+                self.last_used = time.time()
 
             # Trim to max message length
             max_len = int(getattr(self.config, "max_message_length", 250))
