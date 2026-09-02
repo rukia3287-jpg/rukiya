@@ -17,3 +17,5 @@ env/
 # Unzipped directory artifacts
 rukiya-main/
 
+# Workspace agent rules & scratch
+.agents/
