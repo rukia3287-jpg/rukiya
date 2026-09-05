@@ -150,6 +150,60 @@ class YouTubeService:
             logger.error(f"Failed to get live chat ID: {e}")
             return None
 
+    def is_stream_live(self, video_id: str) -> bool:
+        """Check if the video is currently an active live stream.
+
+        Returns False if the stream has ended, not found, or is not live.
+        Returns True if the stream is active.
+        """
+        try:
+            if not self.youtube:
+                logger.warning("YouTube client not initialized")
+                return False
+
+            response = self.youtube.videos().list(
+                part="snippet,liveStreamingDetails",
+                id=video_id
+            ).execute()
+
+            items = response.get("items", [])
+            if not items:
+                logger.info(f"Video {video_id} not found; stream considered ended")
+                return False
+
+            item = items[0]
+            live_details = item.get("liveStreamingDetails", {})
+            snippet = item.get("snippet", {})
+
+            # If actualEndTime is present, stream has finished
+            if live_details.get("actualEndTime"):
+                logger.info(f"Stream {video_id} has actualEndTime; stream ended")
+                return False
+
+            # If liveBroadcastContent is 'none', it is not an active live stream
+            broadcast_content = snippet.get("liveBroadcastContent")
+            if broadcast_content == "none":
+                logger.info(f"Stream {video_id} liveBroadcastContent is 'none'; stream ended")
+                return False
+
+            # If activeLiveChatId is absent, the live chat is no longer active
+            if not live_details.get("activeLiveChatId"):
+                logger.info(f"Stream {video_id} has no activeLiveChatId; stream ended")
+                return False
+
+            return True
+
+        except Exception as e:
+            status = getattr(getattr(e, "resp", None), "status", None) or getattr(e, "status_code", None)
+            if status == 404:
+                logger.info(f"Video {video_id} returned 404; stream ended")
+                return False
+            if isinstance(e, HttpError):
+                logger.error(f"HttpError checking stream status for {video_id}: {e}")
+                raise
+            logger.error(f"Error checking stream status for {video_id}: {e}")
+            raise
+
     def get_chat_messages(self, live_chat_id: str, page_token: Optional[str] = None) -> Dict[str, Any]:
         """Blocking call to fetch chat messages; run from thread when used in async context."""
         try:
@@ -230,6 +284,11 @@ class ChatBot:
             if not response:
                 return
 
+            if response.get("offlineAt"):
+                logger.info(f"YouTube stream has ended (offlineAt: {response.get('offlineAt')}); stopping chat bot")
+                self.stop()
+                return
+
             self.next_page_token = response.get("nextPageToken")
             messages = response.get("items", [])
 
@@ -260,6 +319,11 @@ class ChatBot:
                     logger.error(f"Error processing a message: {e}")
 
         except Exception as e:
+            err_str = str(e).lower()
+            if any(term in err_str for term in ("livechatended", "livechatnotfound", "livechatdisabled", "live chat is no longer active")):
+                logger.info(f"YouTube live stream/chat ended ({e}); stopping chat bot")
+                self.stop()
+                return
             logger.error(f"Error during _process_once: {e}")
 
     async def run_async(self, video_id: str):

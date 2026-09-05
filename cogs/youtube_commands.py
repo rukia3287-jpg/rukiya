@@ -44,6 +44,23 @@ class YouTubeCommands(commands.Cog):
             await interaction.followup.send(f"❌ Could not find an active live chat for video id `{video_id}`. Is the stream live?", ephemeral=True)
             return
 
+        # Register automatic stop notification callback for when the stream ends
+        channel = interaction.channel
+        async def on_monitor_stop(reason: str):
+            self.bot.chat_monitor.unregister_stop_callback(on_monitor_stop)
+            if reason == "stream_ended" and channel:
+                try:
+                    embed = discord.Embed(
+                        title="🛑 YouTube Stream Ended",
+                        description=f"Live stream `{video_id}` has ended. YouTube chat bot has stopped automatically.",
+                        color=discord.Color.orange()
+                    )
+                    await channel.send(embed=embed)
+                except Exception:
+                    logger.exception("Failed to send stream-ended notification to Discord channel")
+
+        self.bot.chat_monitor.register_stop_callback(on_monitor_stop)
+
         # Start monitoring
         self.bot.chat_monitor.start_monitoring(live_chat_id, video_id)
 
@@ -70,7 +87,7 @@ class YouTubeCommands(commands.Cog):
             await interaction.followup.send("⚠️ Bot is not running.", ephemeral=True)
             return
 
-        self.bot.chat_monitor.stop_monitoring()
+        self.bot.chat_monitor.stop_monitoring(reason="manual")
         await interaction.followup.send("🛑 Monitoring stopped.", ephemeral=True)
 
     @app_commands.command(name="yt_status", description="Get basic YouTube monitoring status")
@@ -89,6 +106,8 @@ class YouTubeCommands(commands.Cog):
         embed = discord.Embed(title="YouTube Monitor Status", color=discord.Color.blue())
         embed.add_field(name="Running", value=str(st.get("is_running")), inline=True)
         embed.add_field(name="Video ID", value=st.get("video_id") or "N/A", inline=True)
+        if not st.get("is_running") and st.get("last_stop_reason"):
+            embed.add_field(name="Last Stop Reason", value=str(st.get("last_stop_reason")), inline=True)
         embed.add_field(name="Processed messages", value=str(st.get("processed_count")), inline=True)
         embed.add_field(name="AI cooldown remaining", value=f"{st.get('ai_cooldown_remaining'):.1f}s", inline=True)
 

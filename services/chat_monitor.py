@@ -33,6 +33,8 @@ class ChatMonitor:
         self.subscribers: list[SubscriberType] = []
         self._monitor_task: Optional[asyncio.Task] = None
         self._stopping = False
+        self.last_stop_reason: Optional[str] = None
+        self._stop_callbacks: list[Callable[[str], Awaitable[Any]]] = []
         self._poll_interval = float(self._cfg("poll_interval", 10.0))
         self._next_poll_delay = self._poll_interval
         self._send_cooldown = float(self._cfg("send_cooldown", 2.0))
@@ -42,6 +44,8 @@ class ChatMonitor:
         self._idle_chat_messages = [m.strip() for m in messages if isinstance(m, str) and m.strip()]
         self._last_activity_at = time.monotonic()
         self._last_idle_message_at = 0.0
+        self._stream_check_interval = float(self._cfg("stream_check_interval", 60.0))
+        self._last_stream_check_at = time.monotonic()
 
     def _cfg(self, key: str, default: Any = None) -> Any:
         if self.config is None:
@@ -55,6 +59,21 @@ class ChatMonitor:
     def unsubscribe(self, callback: SubscriberType) -> None:
         if callback in self.subscribers:
             self.subscribers.remove(callback)
+
+    def register_stop_callback(self, callback: Callable[[str], Awaitable[Any]]) -> None:
+        if callback not in self._stop_callbacks:
+            self._stop_callbacks.append(callback)
+
+    def unregister_stop_callback(self, callback: Callable[[str], Awaitable[Any]]) -> None:
+        if callback in self._stop_callbacks:
+            self._stop_callbacks.remove(callback)
+
+    async def _notify_stop_callbacks(self, reason: str) -> None:
+        for callback in list(self._stop_callbacks):
+            try:
+                await callback(reason)
+            except Exception:
+                logger.exception("Stop callback failed: %r", callback)
 
     async def _notify_subscribers(self, message: str, author: str) -> None:
         for callback in list(self.subscribers):
@@ -72,8 +91,11 @@ class ChatMonitor:
         self.is_running = True
         self.next_page_token = None
         self.processed_messages.clear()
+        self.last_stop_reason = None
         self._next_poll_delay = self._poll_interval
-        self._last_activity_at, self._last_idle_message_at = time.monotonic(), 0.0
+        self._last_activity_at = time.monotonic()
+        self._last_idle_message_at = 0.0
+        self._last_stream_check_at = time.monotonic()
         logger.info("Started monitoring chat: %s", live_chat_id)
         if not start_background:
             return True
@@ -86,24 +108,31 @@ class ChatMonitor:
         logger.info("Background monitor loop started")
         return True
 
-    def stop_monitoring(self) -> None:
+    def stop_monitoring(self, reason: str = "manual") -> None:
         """Request cancellation; the loop's finally block logs confirmed completion."""
         task = self._monitor_task
         self.is_running = False
+        self.last_stop_reason = reason
         self._stopping = bool(task and not task.done())
         if task and not task.done():
             task.cancel()
-            logger.info("Monitor task cancellation requested")
+            logger.info("Monitor task cancellation requested (reason: %s)", reason)
         else:
             self._stopping = False
         self.live_chat_id = self.video_id = self.next_page_token = None
         self.processed_messages.clear()
 
     def get_status(self) -> dict[str, Any]:
-        return {"is_running": self.is_running, "is_stopping": self._stopping, "live_chat_id": self.live_chat_id,
-                "video_id": self.video_id, "processed_count": len(self.processed_messages),
-                "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
-                "subscribers_count": len(self.subscribers)}
+        return {
+            "is_running": self.is_running,
+            "is_stopping": self._stopping,
+            "last_stop_reason": self.last_stop_reason,
+            "live_chat_id": self.live_chat_id,
+            "video_id": self.video_id,
+            "processed_count": len(self.processed_messages),
+            "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
+            "subscribers_count": len(self.subscribers),
+        }
 
     @staticmethod
     def _is_quota_exhausted(exc: Exception) -> bool:
@@ -112,6 +141,38 @@ class ChatMonitor:
         if isinstance(content, bytes):
             content = content.decode("utf-8", "replace")
         return status == 403 and "quotaExceeded" in (str(exc) + str(content))
+
+    @staticmethod
+    def _is_stream_ended_error(exc: Exception) -> bool:
+        status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+        content = getattr(exc, "content", b"")
+        if isinstance(content, bytes):
+            content = content.decode("utf-8", "replace")
+        combined = (str(exc) + " " + str(content)).lower()
+
+        if "quotaexceeded" in combined:
+            return False
+
+        ended_indicators = (
+            "livechatended",
+            "livechatnotfound",
+            "livechatdisabled",
+            "livebroadcastended",
+            "livebroadcastnotfound",
+            "videonotfound",
+            "live chat is no longer active",
+            "live chat is closed",
+            "live chat is disabled",
+            "broadcast has ended",
+            "the broadcast has ended",
+        )
+        if any(ind in combined for ind in ended_indicators):
+            return True
+
+        if status in (403, 404) and ("livechat" in combined or "broadcast" in combined):
+            return True
+
+        return False
 
     def _set_poll_delay(self, response: dict[str, Any]) -> None:
         hint = response.get("pollingIntervalMillis")
@@ -150,6 +211,27 @@ class ChatMonitor:
     async def process_messages(self) -> None:
         if not self.is_running or not self.live_chat_id:
             return
+
+        # Periodic check if stream is still live via video_id
+        if self.video_id and hasattr(self.youtube, "is_stream_live"):
+            now = time.monotonic()
+            if now - self._last_stream_check_at >= self._stream_check_interval:
+                self._last_stream_check_at = now
+                try:
+                    is_live = await asyncio.to_thread(self.youtube.is_stream_live, self.video_id)
+                    if not is_live:
+                        logger.info("YouTube stream %s is no longer live; stopping monitor", self.video_id)
+                        self.stop_monitoring(reason="stream_ended")
+                        await asyncio.sleep(0)
+                        return
+                except Exception as check_exc:
+                    if self._is_stream_ended_error(check_exc):
+                        logger.info("Stream check confirmed stream ended (%s); stopping monitor", check_exc)
+                        self.stop_monitoring(reason="stream_ended")
+                        await asyncio.sleep(0)
+                        return
+                    logger.debug("Liveness check transient error: %s", check_exc)
+
         try:
             response = await asyncio.to_thread(self.youtube.get_chat_messages, self.live_chat_id, self.next_page_token)
             if not response:
@@ -165,15 +247,29 @@ class ChatMonitor:
                 self.processed_messages.add(message_id)
                 self._last_activity_at = time.monotonic()
                 await self._notify_subscribers(message, author)
+
+            # Check if YouTube indicates stream / chat is offline
+            offline_at = response.get("offlineAt")
+            if offline_at:
+                logger.info("YouTube stream has ended (offlineAt: %s); stopping monitor", offline_at)
+                self.stop_monitoring(reason="stream_ended")
+                await asyncio.sleep(0)
+                return
+
             await self._maybe_send_idle_message()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if self._is_quota_exhausted(exc):
                 logger.error("YouTube quota exhausted; monitoring stops without retry")
-                self.stop_monitoring()
+                self.stop_monitoring(reason="quota_exceeded")
                 # A task that cancels itself must reach an await point to
                 # receive (and let _monitor_loop handle) CancelledError.
+                await asyncio.sleep(0)
+                return
+            if self._is_stream_ended_error(exc):
+                logger.info("YouTube stream or live chat has ended (%s); monitoring stops automatically", exc)
+                self.stop_monitoring(reason="stream_ended")
                 await asyncio.sleep(0)
                 return
             logger.warning("Polling failed (%s); retrying after exponential backoff", exc)
@@ -208,7 +304,12 @@ class ChatMonitor:
         except asyncio.CancelledError:
             logger.info("Monitor loop received cancellation")
         finally:
+            reason = self.last_stop_reason or "stopped"
             self.is_running = False
             self._stopping = False
             self._monitor_task = None
-            logger.info("Monitor task finished")
+            logger.info("Monitor task finished (reason: %s)", reason)
+            try:
+                await self._notify_stop_callbacks(reason)
+            except Exception:
+                logger.exception("Stop callback notification failed")
