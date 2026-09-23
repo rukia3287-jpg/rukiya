@@ -14,8 +14,20 @@ venv/
 .venv/
 env/
 
-# Unzipped directory artifacts
-rukiya-main/
+# Local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+rukiya_memory.db
 
-# Workspace agent rules & scratch
+# OAuth credentials and token generators
+token.json
+client_secret.json
+client_secrets.json
+create_token.txt
+
+# Test and tool artifacts
+.pytest_cache/
+rukiya-main/
 .agents/
