@@ -90,8 +90,10 @@ async def main():
                 err = classify_provider_error(res_search.error or "Unknown", provider="gemini", capability="search")
                 print(f"  -> SEARCH FAILED fast: {res_search.error}")
                 print(f"  -> Classified Category: {err.category.value} (status_code={err.status_code})")
-                if err.status_code == 429:
+                if err.status_code == 429 or err.category == ErrorCategory.RATE_LIMITED:
                     gem_search_status = "RATE_LIMITED"
+                elif err.category == ErrorCategory.QUOTA_EXHAUSTED:
+                    gem_search_status = "QUOTA_EXHAUSTED"
                 else:
                     gem_search_status = "UNAVAILABLE"
 

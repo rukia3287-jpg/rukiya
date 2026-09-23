@@ -43,7 +43,7 @@ class ClientManager:
         return self._sdk_available
 
     def validate_credentials(self) -> bool:
-        return bool(self.api_key and self.api_key.strip())
+        return bool((self.api_key and self.api_key.strip()) or self._client is not None)
 
     def get_client(self) -> Optional[Any]:
         if self._client is not None:
@@ -63,7 +63,7 @@ class ClientManager:
         self._client = client
 
     def health_check(self) -> bool:
-        return self.validate_credentials() and (self.is_sdk_available() or self._client is not None)
+        return self._client is not None or (self.validate_credentials() and self.is_sdk_available())
 
 
 # ─────────────────────────────────────────────────────────────
@@ -268,11 +268,23 @@ class GroundingEngine:
 # 4. Search Engine (With 429 Fail-Fast & AFC Warning Mitigation)
 # ─────────────────────────────────────────────────────────────
 class SearchEngine:
-    """Executes Google Search grounding via Gemini API with immediate 429 fail-fast."""
+    """Executes Google Search grounding via Gemini API with immediate 429 fail-fast and zero transport fallthrough."""
 
     def __init__(self, client_manager: ClientManager, response_parser: ResponseParser):
         self.client_manager = client_manager
         self.response_parser = response_parser
+        self._seen_requests: Dict[str, Dict[str, Any]] = {}
+
+    def _record_attempt(self, req_id: str, attempt: int, result: AIProviderResult, retryable: bool) -> None:
+        if len(self._seen_requests) > 1000:
+            to_remove = list(self._seen_requests.keys())[:500]
+            for k in to_remove:
+                self._seen_requests.pop(k, None)
+        self._seen_requests[req_id] = {
+            "attempts": attempt,
+            "last_result": result,
+            "retryable": retryable
+        }
 
     async def search(
         self,
@@ -280,110 +292,202 @@ class SearchEngine:
         system_instruction: Optional[str] = None,
         context: Optional[str] = None,
         max_tokens: int = 250,
-        timeout: float = 15.0
+        timeout: float = 15.0,
+        request_id: Optional[str] = None,
+        attempt: int = 1,
+        **kwargs: Any
     ) -> AIProviderResult:
         start_time = time.time()
+        req_id = request_id or f"search_{int(time.time() * 1000)}"
+        attempt_id = attempt
+
+        # DUPLICATE REQUEST GUARD: Prevent identical logical Search operations from re-executing
+        if req_id in self._seen_requests:
+            record = self._seen_requests[req_id]
+            max_allowed = 2 if record.get("retryable", False) else 1
+            if record.get("attempts", 0) >= max_allowed:
+                logger.warning(
+                    "Duplicate search blocked by duplicate request guard: req_id=%s attempts=%d max=%d",
+                    req_id, record.get("attempts", 0), max_allowed
+                )
+                return record["last_result"]
+
         client = self.client_manager.get_client()
         if not client:
             err = ProviderError(
                 provider="gemini",
                 capability="search",
                 category=ErrorCategory.AUTH_ERROR,
+                retryable=False,
                 message="Gemini client unavailable or unconfigured"
             )
-            return self.response_parser.normalize_response(
+            res = self.response_parser.normalize_response(
                 None, (time.time() - start_time) * 1000.0, used_search=True, error_details=err
             )
+            self._record_attempt(req_id, attempt_id, res, retryable=False)
+            return res
 
         prompt = query
         if context:
             prompt = f"Context:\n{context}\n\nUser Question: {query}"
 
-        try:
-            async def _execute_search():
-                # 1. Check if native async client exists (client.aio)
-                if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                    try:
-                        from google.genai import types  # type: ignore
-                        cfg_kwargs = {
-                            "tools": [{"google_search": {}}],
-                            "temperature": 0.3,
-                            "max_output_tokens": max_tokens,
-                            "system_instruction": system_instruction,
-                        }
-                        # Disable AFC warning: search grounding does not need client-side AFC loop
-                        if hasattr(types, "AutomaticFunctionCallingConfig"):
-                            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-                        config = types.GenerateContentConfig(**cfg_kwargs)
-                        return await client.aio.models.generate_content(
-                            model=self.client_manager.model,
-                            contents=prompt,
-                            config=config
-                        )
-                    except Exception:
-                        pass
+        # 1. Transport Decision: Choose transport upfront.
+        # Transport fallback (sync) is allowed ONLY if the async SDK interface does not exist.
+        # Once an API call is dispatched, any provider error MUST NOT trigger a second transport.
+        has_async_transport = (
+            hasattr(client, "aio")
+            and hasattr(client.aio, "models")
+            and callable(getattr(client.aio.models, "generate_content", None))
+        )
 
-                # 2. Synchronous fallback run inside executor with fast exception capture
-                def _sync_call():
-                    try:
-                        from google.genai import types  # type: ignore
-                        cfg_kwargs = {
-                            "tools": [{"google_search": {}}],
-                            "temperature": 0.3,
-                            "max_output_tokens": max_tokens,
-                            "system_instruction": system_instruction,
-                        }
-                        if hasattr(types, "AutomaticFunctionCallingConfig"):
-                            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-                        config = types.GenerateContentConfig(**cfg_kwargs)
+        if has_async_transport:
+            transport = "async"
+            logger.info(
+                "event=provider_call request_id=%s attempt=%d provider=gemini capability=search transport=%s",
+                req_id, attempt_id, transport
+            )
+            try:
+                from google.genai import types  # type: ignore
+                cfg_kwargs = {
+                    "tools": [{"google_search": {}}],
+                    "temperature": 0.3,
+                    "max_output_tokens": max_tokens,
+                    "system_instruction": system_instruction,
+                }
+                # Disable AFC warning: search grounding does not need client-side AFC loop
+                if hasattr(types, "AutomaticFunctionCallingConfig"):
+                    cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+                else:
+                    cfg_kwargs["automatic_function_calling"] = {"disable": True}
+                config = types.GenerateContentConfig(**cfg_kwargs)
+            except Exception:
+                config = None
+
+            try:
+                call_coro = (
+                    client.aio.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=prompt,
+                        config=config
+                    )
+                    if config is not None
+                    else client.aio.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=prompt
+                    )
+                )
+                resp = await asyncio.wait_for(call_coro, timeout=timeout)
+                latency_ms = (time.time() - start_time) * 1000.0
+                res = self.response_parser.normalize_response(resp, latency_ms, used_search=True)
+                self._record_attempt(req_id, attempt_id, res, retryable=False)
+                return res
+
+            except asyncio.TimeoutError:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(
+                    f"Gemini search request timed out ({timeout}s)",
+                    status_code=504,
+                    provider="gemini",
+                    capability="search"
+                )
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=search category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                res = self.response_parser.normalize_response(None, latency_ms, used_search=True, error_details=err)
+                self._record_attempt(req_id, attempt_id, res, retryable=err.retryable)
+                return res
+
+            except Exception as e:
+                # CRITICAL: Immediate classification. NEVER fall through to sync transport!
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(e, provider="gemini", capability="search")
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=search category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                res = self.response_parser.normalize_response(None, latency_ms, used_search=True, error_details=err)
+                self._record_attempt(req_id, attempt_id, res, retryable=err.retryable)
+                return res
+
+        else:
+            # Sync transport used ONLY if async transport is unavailable on client
+            transport = "sync"
+            logger.info(
+                "event=provider_call request_id=%s attempt=%d provider=gemini capability=search transport=%s",
+                req_id, attempt_id, transport
+            )
+
+            def _sync_call():
+                try:
+                    from google.genai import types  # type: ignore
+                    cfg_kwargs = {
+                        "tools": [{"google_search": {}}],
+                        "temperature": 0.3,
+                        "max_output_tokens": max_tokens,
+                        "system_instruction": system_instruction,
+                    }
+                    if hasattr(types, "AutomaticFunctionCallingConfig"):
+                        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+                    else:
+                        cfg_kwargs["automatic_function_calling"] = {"disable": True}
+                    config = types.GenerateContentConfig(**cfg_kwargs)
+                    return client.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=prompt,
+                        config=config
+                    )
+                except Exception as inner_e:
+                    if hasattr(client, "generate_content"):
+                        return client.generate_content(prompt, tools=["google_search"])
+                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
                         return client.models.generate_content(
                             model=self.client_manager.model,
-                            contents=prompt,
-                            config=config
+                            contents=prompt
                         )
-                    except Exception:
-                        if hasattr(client, "generate_content"):
-                            return client.generate_content(prompt, tools=["google_search"])
-                        if hasattr(client, "models") and hasattr(client.models, "generate_content"):
-                            return client.models.generate_content(
-                                model=self.client_manager.model,
-                                contents=prompt
-                            )
-                        raise
+                    raise inner_e
 
-                loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(None, _sync_call)
+            loop = asyncio.get_running_loop()
+            try:
+                resp = await asyncio.wait_for(loop.run_in_executor(None, _sync_call), timeout=timeout)
+                latency_ms = (time.time() - start_time) * 1000.0
+                res = self.response_parser.normalize_response(resp, latency_ms, used_search=True)
+                self._record_attempt(req_id, attempt_id, res, retryable=False)
+                return res
 
-            resp = await asyncio.wait_for(_execute_search(), timeout=timeout)
-            latency_ms = (time.time() - start_time) * 1000.0
-            return self.response_parser.normalize_response(resp, latency_ms, used_search=True)
+            except asyncio.TimeoutError:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(
+                    f"Gemini search request timed out ({timeout}s)",
+                    status_code=504,
+                    provider="gemini",
+                    capability="search"
+                )
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=search category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                res = self.response_parser.normalize_response(None, latency_ms, used_search=True, error_details=err)
+                self._record_attempt(req_id, attempt_id, res, retryable=err.retryable)
+                return res
 
-        except asyncio.TimeoutError:
-            latency_ms = (time.time() - start_time) * 1000.0
-            err = classify_provider_error(
-                f"Gemini search request timed out ({timeout}s)",
-                status_code=504,
-                provider="gemini",
-                capability="search"
-            )
-            return self.response_parser.normalize_response(
-                None, latency_ms, used_search=True, error_details=err
-            )
-        except Exception as e:
-            latency_ms = (time.time() - start_time) * 1000.0
-            # FAIL FAST: classify error immediately (429, 403, 401, etc.)
-            err = classify_provider_error(e, provider="gemini", capability="search")
-            logger.warning("Gemini search exception: %s (category=%s, status=%s)", e, err.category.value, err.status_code)
-            return self.response_parser.normalize_response(
-                None, latency_ms, used_search=True, error_details=err
-            )
+            except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(e, provider="gemini", capability="search")
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=search category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                res = self.response_parser.normalize_response(None, latency_ms, used_search=True, error_details=err)
+                self._record_attempt(req_id, attempt_id, res, retryable=err.retryable)
+                return res
 
 
 # ─────────────────────────────────────────────────────────────
 # 5. Generation Engine
 # ─────────────────────────────────────────────────────────────
 class GenerationEngine:
-    """Executes standard generation without search grounding."""
+    """Executes standard generation without search grounding, with strict single transport attempt."""
 
     def __init__(self, client_manager: ClientManager, response_parser: ResponseParser):
         self.client_manager = client_manager
@@ -395,87 +499,149 @@ class GenerationEngine:
         system_instruction: Optional[str] = None,
         max_tokens: int = 150,
         temperature: float = 0.85,
-        timeout: float = 20.0
+        timeout: float = 20.0,
+        request_id: Optional[str] = None,
+        attempt: int = 1,
+        **kwargs: Any
     ) -> AIProviderResult:
         start_time = time.time()
+        req_id = request_id or f"gen_{int(time.time() * 1000)}"
+        attempt_id = attempt
+
         client = self.client_manager.get_client()
         if not client:
             err = ProviderError(
                 provider="gemini",
                 capability="generation",
                 category=ErrorCategory.AUTH_ERROR,
+                retryable=False,
                 message="Gemini client unavailable or unconfigured"
             )
             return self.response_parser.normalize_response(
                 None, (time.time() - start_time) * 1000.0, used_search=False, error_details=err
             )
 
-        try:
-            async def _execute_generate():
-                if hasattr(client, "aio") and hasattr(client.aio, "models"):
-                    try:
-                        from google.genai import types  # type: ignore
-                        config = types.GenerateContentConfig(
-                            temperature=temperature,
-                            max_output_tokens=max_tokens,
-                            system_instruction=system_instruction
-                        )
-                        return await client.aio.models.generate_content(
-                            model=self.client_manager.model,
-                            contents=contents,
-                            config=config
-                        )
-                    except Exception:
-                        pass
+        has_async_transport = (
+            hasattr(client, "aio")
+            and hasattr(client.aio, "models")
+            and callable(getattr(client.aio.models, "generate_content", None))
+        )
 
-                def _call_gemini():
-                    try:
-                        from google.genai import types  # type: ignore
-                        config = types.GenerateContentConfig(
-                            temperature=temperature,
-                            max_output_tokens=max_tokens,
-                            system_instruction=system_instruction
-                        )
+        if has_async_transport:
+            transport = "async"
+            logger.info(
+                "event=provider_call request_id=%s attempt=%d provider=gemini capability=generation transport=%s",
+                req_id, attempt_id, transport
+            )
+            try:
+                from google.genai import types  # type: ignore
+                config = types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                    system_instruction=system_instruction
+                )
+            except Exception:
+                config = None
+
+            try:
+                call_coro = (
+                    client.aio.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=contents,
+                        config=config
+                    )
+                    if config is not None
+                    else client.aio.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=contents
+                    )
+                )
+                resp = await asyncio.wait_for(call_coro, timeout=timeout)
+                latency_ms = (time.time() - start_time) * 1000.0
+                return self.response_parser.normalize_response(resp, latency_ms, used_search=False)
+
+            except asyncio.TimeoutError:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(
+                    f"Gemini generation timeout ({timeout}s)",
+                    status_code=504,
+                    provider="gemini",
+                    capability="generation"
+                )
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=generation category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                return self.response_parser.normalize_response(None, latency_ms, used_search=False, error_details=err)
+
+            except Exception as e:
+                # Immediate classification: NEVER fall through to sync
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(e, provider="gemini", capability="generation")
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=generation category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                return self.response_parser.normalize_response(None, latency_ms, used_search=False, error_details=err)
+
+        else:
+            transport = "sync"
+            logger.info(
+                "event=provider_call request_id=%s attempt=%d provider=gemini capability=generation transport=%s",
+                req_id, attempt_id, transport
+            )
+
+            def _call_gemini():
+                try:
+                    from google.genai import types  # type: ignore
+                    config = types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                        system_instruction=system_instruction
+                    )
+                    return client.models.generate_content(
+                        model=self.client_manager.model,
+                        contents=contents,
+                        config=config
+                    )
+                except Exception as inner_e:
+                    if hasattr(client, "generate_content"):
+                        return client.generate_content(contents)
+                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
                         return client.models.generate_content(
                             model=self.client_manager.model,
-                            contents=contents,
-                            config=config
+                            contents=contents
                         )
-                    except Exception:
-                        if hasattr(client, "generate_content"):
-                            return client.generate_content(contents)
-                        if hasattr(client, "models") and hasattr(client.models, "generate_content"):
-                            return client.models.generate_content(
-                                model=self.client_manager.model,
-                                contents=contents
-                            )
-                        raise
+                    raise inner_e
 
-                loop = asyncio.get_running_loop()
-                return await loop.run_in_executor(None, _call_gemini)
+            loop = asyncio.get_running_loop()
+            try:
+                resp = await asyncio.wait_for(loop.run_in_executor(None, _call_gemini), timeout=timeout)
+                latency_ms = (time.time() - start_time) * 1000.0
+                return self.response_parser.normalize_response(resp, latency_ms, used_search=False)
 
-            resp = await asyncio.wait_for(_execute_generate(), timeout=timeout)
-            latency_ms = (time.time() - start_time) * 1000.0
-            return self.response_parser.normalize_response(resp, latency_ms, used_search=False)
+            except asyncio.TimeoutError:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(
+                    f"Gemini generation timeout ({timeout}s)",
+                    status_code=504,
+                    provider="gemini",
+                    capability="generation"
+                )
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=generation category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                return self.response_parser.normalize_response(None, latency_ms, used_search=False, error_details=err)
 
-        except asyncio.TimeoutError:
-            latency_ms = (time.time() - start_time) * 1000.0
-            err = classify_provider_error(
-                f"Gemini generation timeout ({timeout}s)",
-                status_code=504,
-                provider="gemini",
-                capability="generation"
-            )
-            return self.response_parser.normalize_response(
-                None, latency_ms, used_search=False, error_details=err
-            )
-        except Exception as e:
-            latency_ms = (time.time() - start_time) * 1000.0
-            err = classify_provider_error(e, provider="gemini", capability="generation")
-            logger.warning("Gemini generation exception: %s (category=%s)", e, err.category.value)
-            return self.response_parser.normalize_response(
-                None, latency_ms, used_search=False, error_details=err
-            )
+            except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000.0
+                err = classify_provider_error(e, provider="gemini", capability="generation")
+                logger.warning(
+                    "event=provider_failure request_id=%s provider=gemini capability=generation category=%s status_code=%s transport=%s attempt=%d retryable=%s fallback=required",
+                    req_id, err.category.value, err.status_code, transport, attempt_id, str(err.retryable).lower()
+                )
+                return self.response_parser.normalize_response(None, latency_ms, used_search=False, error_details=err)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -512,24 +678,39 @@ class GeminiProvider(AIProvider):
         # Independent capability tracking
         self.generation_capability: CapabilityState = CapabilityState.AVAILABLE
         self.search_capability: CapabilityState = CapabilityState.AVAILABLE
+        self._search_cooldown_until: float = 0.0
+        self._health_tracker: Optional[Any] = None
+
+    def set_health_tracker(self, tracker: Any) -> None:
+        """Synchronize provider capability with central health tracker."""
+        self._health_tracker = tracker
 
     def is_configured(self) -> bool:
         return self.client_manager.health_check()
 
     def is_generation_available(self) -> bool:
-        return self.is_configured() and self.generation_capability not in (
-            CapabilityState.DISABLED, CapabilityState.AUTH_FAILED
-        )
+        if not self.is_configured():
+            return False
+        if self._health_tracker:
+            return self._health_tracker.is_available("gemini:generation") and self.generation_capability not in (
+                CapabilityState.DISABLED, CapabilityState.AUTH_FAILED
+            )
+        return self.generation_capability not in (CapabilityState.DISABLED, CapabilityState.AUTH_FAILED)
 
     def is_search_available(self) -> bool:
         search_enabled = getattr(self.config, "gemini_search_enabled", True)
-        return (
-            self.is_configured()
-            and search_enabled
-            and self.search_capability not in (
-                CapabilityState.DISABLED, CapabilityState.AUTH_FAILED, CapabilityState.RATE_LIMITED
+        if not self.is_configured() or not search_enabled:
+            return False
+        if self._health_tracker:
+            return self._health_tracker.is_available("gemini:search") and self.search_capability not in (
+                CapabilityState.DISABLED, CapabilityState.AUTH_FAILED
             )
-        )
+        if self.search_capability in (CapabilityState.DISABLED, CapabilityState.AUTH_FAILED, CapabilityState.QUOTA_EXHAUSTED):
+            return False
+        if self.search_capability == CapabilityState.RATE_LIMITED:
+            if time.time() < self._search_cooldown_until:
+                return False
+        return True
 
     async def generate(
         self,
@@ -554,7 +735,8 @@ class GeminiProvider(AIProvider):
             system_instruction=system_instruction,
             max_tokens=max_tokens,
             temperature=temperature,
-            timeout=self.timeout
+            timeout=self.timeout,
+            **kwargs
         )
         if res.error_category == ErrorCategory.RATE_LIMITED:
             self.generation_capability = CapabilityState.RATE_LIMITED
@@ -577,10 +759,13 @@ class GeminiProvider(AIProvider):
             system_instruction=system_instruction,
             context=context,
             max_tokens=max_tokens,
-            timeout=self.search_timeout
+            timeout=self.search_timeout,
+            **kwargs
         )
         if res.error_category == ErrorCategory.RATE_LIMITED:
             self.search_capability = CapabilityState.RATE_LIMITED
+            cooldown = res.error_details.retry_after if (res.error_details and res.error_details.retry_after) else 60.0
+            self._search_cooldown_until = time.time() + cooldown
         elif res.error_category == ErrorCategory.QUOTA_EXHAUSTED:
             self.search_capability = CapabilityState.QUOTA_EXHAUSTED
         elif res.error_category == ErrorCategory.AUTH_ERROR:

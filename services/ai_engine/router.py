@@ -8,7 +8,7 @@ from typing import Optional
 
 from services.ai_engine.budget import BudgetManager
 from services.ai_engine.health import ProviderHealthTracker
-from services.ai_engine.models import AIEngineRequest, Plan, RouteType
+from services.ai_engine.models import AIEngineRequest, CapabilityState, Plan, RouteType
 from services.config import Config
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,12 @@ class Router:
             if "gemini:search" in getattr(health, "circuits", {})
             else health.is_available("gemini")
         ) and budget.can_search(request.user_id)
+
+        # Enforce capability state consistency: never route to search if capability is RATE_LIMITED/QUOTA_EXHAUSTED
+        if hasattr(health, "get_capability_state"):
+            search_cap = health.get_capability_state("gemini", capability="search")
+            if search_cap in (CapabilityState.RATE_LIMITED, CapabilityState.QUOTA_EXHAUSTED, CapabilityState.AUTH_FAILED):
+                gem_search_avail = False
         
         # Low priority requests drop optional search if resources are constrained
         if getattr(request, "priority", None) and str(getattr(request.priority, "value", request.priority)).lower() == "low":

@@ -33,6 +33,7 @@ from services.ai_engine.models import (
 )
 from services.ai_engine.provider_registry import ProviderRegistry
 from services.ai_engine.providers.base import AIProvider
+from services.ai_engine.providers.gemini import GeminiProvider, SearchEngine
 from services.config import Config
 
 
@@ -300,6 +301,176 @@ class TestAIEngineHardening(unittest.IsolatedAsyncioTestCase):
             tracker.record_call("gemini:search", True, 80.0)
             self.assertEqual(tracker.get_circuit_state("gemini:search"), CircuitState.CLOSED)
             self.assertTrue(tracker.is_available("gemini:search"))
+
+    def test_immediate_circuit_breaker_trip_on_first_429(self):
+        """A single 429/RATE_LIMITED must trip the circuit breaker immediately without waiting for 3 failures."""
+        tracker = ProviderHealthTracker()
+        err_429 = ProviderError("gemini", "search", ErrorCategory.RATE_LIMITED, 429)
+        # Exactly 1 failure
+        tracker.record_call("gemini:search", False, 50.0, error=err_429)
+
+        # Circuit must be OPEN immediately
+        self.assertEqual(tracker.get_circuit_state("gemini:search"), CircuitState.OPEN)
+        self.assertFalse(tracker.is_available("gemini:search"))
+        self.assertEqual(tracker.get_capability_state("gemini", capability="search"), CapabilityState.RATE_LIMITED)
+
+    async def test_duplicate_transport_prevention_on_async_429(self):
+        """Section 15 & 16: When async transport throws simulated 429 RESOURCE_EXHAUSTED,
+        the sync transport MUST NOT be called. Exactly ONE transport call occurs.
+        """
+        # Realistic Google GenAI ClientError exception
+        class GoogleGenAIClientError(Exception):
+            def __init__(self, code: int, message: str):
+                self.code = code
+                self.message = message
+                super().__init__(f"{code} {message}")
+
+        simulated_429 = GoogleGenAIClientError(
+            429,
+            "RESOURCE_EXHAUSTED: Resource has been exhausted (e.g. check quota)."
+        )
+
+        mock_client = MagicMock()
+        mock_aio = MagicMock()
+        mock_aio_models = MagicMock()
+        mock_sync_models = MagicMock()
+
+        async_generate_mock = AsyncMock(side_effect=simulated_429)
+        sync_generate_mock = MagicMock()
+
+        mock_aio_models.generate_content = async_generate_mock
+        mock_sync_models.generate_content = sync_generate_mock
+        mock_aio.models = mock_aio_models
+        mock_client.aio = mock_aio
+        mock_client.models = mock_sync_models
+
+        provider = GeminiProvider(client=mock_client)
+        start_time = time.time()
+        result = await provider.search_grounded("latest Genshin Impact update", request_id="req_test_429")
+        elapsed = time.time() - start_time
+
+        # 1. Async transport was called exactly once
+        async_generate_mock.assert_awaited_once()
+
+        # 2. Sync transport was NEVER called (bug regression test)
+        sync_generate_mock.assert_not_called()
+
+        # 3. Fail fast: elapsed < 2s
+        self.assertLess(elapsed, 2.0)
+
+        # 4. Error classified correctly as RATE_LIMITED, non-retryable
+        self.assertIsNotNone(result.error_details)
+        self.assertEqual(result.error_details.category, ErrorCategory.RATE_LIMITED)
+        self.assertEqual(result.error_details.status_code, 429)
+        self.assertFalse(result.error_details.retryable)
+
+        # 5. Provider capability state marked RATE_LIMITED
+        self.assertEqual(provider.search_capability, CapabilityState.RATE_LIMITED)
+
+    async def test_fail_fast_search_429_single_call_and_fallback(self):
+        """Section 14: Gemini async Search -> 429.
+        Assert:
+        - Gemini call count == 1
+        - Sync transport NOT called
+        - Elapsed < 2 seconds
+        - OpenRouter fallback happens
+        - verified_current_information is False
+        """
+        class GoogleGenAIClientError(Exception):
+            def __init__(self, code: int, message: str):
+                self.code = code
+                self.message = message
+                super().__init__(f"{code} {message}")
+
+        simulated_429 = GoogleGenAIClientError(
+            429,
+            "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'GenerateContent requests' and limit 'Requests per minute'"
+        )
+
+        mock_client = MagicMock()
+        mock_aio = MagicMock()
+        mock_aio_models = MagicMock()
+        mock_sync_models = MagicMock()
+
+        async_mock = AsyncMock(side_effect=simulated_429)
+        sync_mock = MagicMock()
+
+        mock_aio_models.generate_content = async_mock
+        mock_sync_models.generate_content = sync_mock
+        mock_aio.models = mock_aio_models
+        mock_client.aio = mock_aio
+        mock_client.models = mock_sync_models
+
+        gemini_provider = GeminiProvider(client=mock_client)
+        registry = ProviderRegistry(self.config)
+        registry.register(self.mock_or)
+        registry.register(gemini_provider)
+
+        engine = AIEngine(config=self.config, registry=registry)
+
+        self.mock_or.generate_mock.return_value = AIProviderResult(
+            text="I can't check the current price right now.",
+            provider="openrouter",
+            latency_ms=100.0
+        )
+
+        req = AIEngineRequest(
+            text="GTA 5 price on Steam today",
+            author="viewer1",
+            intent="question"
+        )
+
+        start = time.time()
+        res = await engine.process(req)
+        elapsed = time.time() - start
+
+        # Critical assertions:
+        # 1. Total Gemini calls == 1
+        self.assertEqual(async_mock.await_count, 1)
+        sync_mock.assert_not_called()
+
+        # 2. Elapsed < 2s
+        self.assertLess(elapsed, 2.0, f"Expected fail-fast < 2s, took {elapsed:.2f}s")
+
+        # 3. Fallback occurred
+        self.assertTrue(res.fallback_used)
+        self.assertEqual(res.final_provider, "openrouter")
+        self.assertFalse(res.verified_current_information)
+        self.assertEqual(res.executed_route, "degraded_hybrid")
+
+        await engine.aclose()
+
+    async def test_duplicate_request_guard_blocks_nested_attempts(self):
+        """Section 10: Calling search with the same logical_request_id on a non-retryable error
+        blocks execution on attempt 2 without calling the Gemini SDK a second time.
+        """
+        mock_client = MagicMock()
+        mock_aio = MagicMock()
+        mock_aio_models = MagicMock()
+
+        async_mock = AsyncMock(side_effect=Exception("429 RESOURCE_EXHAUSTED"))
+        mock_aio_models.generate_content = async_mock
+        mock_aio.models = mock_aio_models
+        mock_client.aio = mock_aio
+
+        provider = GeminiProvider(client=mock_client)
+
+        # Attempt 1
+        res1 = await provider.search_engine.search(
+            query="test news",
+            request_id="logical_req_429"
+        )
+        self.assertEqual(async_mock.await_count, 1)
+        self.assertEqual(res1.error_details.category, ErrorCategory.RATE_LIMITED)
+
+        # Attempt 2 for the SAME logical request ID
+        res2 = await provider.search_engine.search(
+            query="test news",
+            request_id="logical_req_429"
+        )
+        # Should be blocked by duplicate request guard without another API call!
+        self.assertEqual(async_mock.await_count, 1)
+        self.assertEqual(res2.error_details.category, ErrorCategory.RATE_LIMITED)
 
     async def test_clean_shutdown(self):
         """aclose() cleans up in-flight deduplicator tasks without throwing."""

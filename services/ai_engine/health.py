@@ -79,7 +79,7 @@ class CircuitBreaker:
                 self.consecutive_successes = 0
                 self.current_cooldown = self.base_recovery_timeout
 
-    def record_failure(self, cooldown: Optional[float] = None) -> None:
+    def record_failure(self, cooldown: Optional[float] = None, trip_immediately: bool = False) -> None:
         self.consecutive_failures += 1
         self.last_failure_time = time.time()
         self.consecutive_successes = 0
@@ -88,8 +88,11 @@ class CircuitBreaker:
         else:
             self.current_cooldown = self.base_recovery_timeout
 
-        if self.state == CircuitState.HALF_OPEN:
-            logger.warning("Failure in HALF_OPEN state; tripping circuit breaker back to OPEN (cooldown=%.1fs).", self.current_cooldown)
+        if self.state == CircuitState.HALF_OPEN or trip_immediately:
+            logger.warning(
+                "Tripping circuit breaker to OPEN (cooldown=%.1fs, immediate=%s).",
+                self.current_cooldown, trip_immediately
+            )
             self.state = CircuitState.OPEN
         elif self.consecutive_failures >= self.failure_threshold:
             logger.warning(
@@ -169,17 +172,21 @@ class ProviderHealthRecord:
             if cooldown is None and error_category:
                 cooldown = ADAPTIVE_COOLDOWNS.get(error_category, 30.0)
 
+            trip_immediately = False
             # Update capability state
             if error_category == ErrorCategory.RATE_LIMITED:
                 self.capability_state = CapabilityState.RATE_LIMITED
+                trip_immediately = True
             elif error_category == ErrorCategory.QUOTA_EXHAUSTED:
                 self.capability_state = CapabilityState.QUOTA_EXHAUSTED
+                trip_immediately = True
             elif error_category == ErrorCategory.AUTH_ERROR:
                 self.capability_state = CapabilityState.AUTH_FAILED
+                trip_immediately = True
             else:
                 self.capability_state = CapabilityState.TEMPORARILY_UNAVAILABLE
 
-            self.breaker.record_failure(cooldown=cooldown)
+            self.breaker.record_failure(cooldown=cooldown, trip_immediately=trip_immediately)
 
     def calculate_health_score(self) -> float:
         """

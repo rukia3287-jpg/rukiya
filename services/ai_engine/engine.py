@@ -84,6 +84,11 @@ class AIEngine:
         )
         self.deduplicator = deduplicator or InFlightDeduplicator()
 
+        # Synchronize Gemini provider with health tracker if registered
+        gemini = self.registry.get("gemini")
+        if gemini and hasattr(gemini, "set_health_tracker"):
+            gemini.set_health_tracker(self.health_tracker)
+
     def get_fallback(self, intent: Optional[str] = None) -> str:
         if intent == "greeting":
             return STATIC_FALLBACKS["greeting"]
@@ -93,7 +98,8 @@ class AIEngine:
         self,
         query: str,
         category: str = "general",
-        time_scope: str = ""
+        time_scope: str = "",
+        request_id: Optional[str] = None
     ) -> Tuple[SearchResult, bool]:
         """Fetch search result from positive cache, negative cache, in-flight task, or Gemini provider."""
         # 1. Check positive cache
@@ -158,7 +164,7 @@ class AIEngine:
 
         # 4. In-flight request deduplication
         async def _fetch() -> SearchResult:
-            res = await self.executor.execute_search(gemini, query=query)
+            res = await self.executor.execute_search(gemini, query=query, request_id=request_id)
             err_details = getattr(res, "error_details", None)
             if res.error and not err_details:
                 err_details = classify_provider_error(res.error, provider="gemini", capability="search")
@@ -309,7 +315,7 @@ class AIEngine:
                 time_scope = plan.search_queries[0].time_scope if plan.search_queries else ""
 
                 sr, hit = await self._execute_search_grounding(
-                    query_to_search, category=category, time_scope=time_scope
+                    query_to_search, category=category, time_scope=time_scope, request_id=request_id
                 )
                 cache_hit = hit
                 citations = sr.citations
@@ -368,6 +374,11 @@ class AIEngine:
                     executed_route = "degraded_hybrid" if route in (RouteType.HYBRID, RouteType.CONSENSUS) else "degraded_search"
                     err_cat = sr.error_details.category.value if sr.error_details else "failed"
                     fallback_reason = f"gemini_search_{err_cat.lower()}"
+
+                    logger.warning(
+                        "event=ai_engine_fallback request_id=%s from=gemini_search to=openrouter reason=%s",
+                        request_id, err_cat.lower()
+                    )
 
                     # Provide structured failure context to final generator with strict anti-hallucination directive
                     if openrouter and self.health_tracker.is_available("openrouter:generation"):
