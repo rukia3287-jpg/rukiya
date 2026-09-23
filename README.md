@@ -107,7 +107,7 @@ Configure these variables in your `.env` file or hosting environment (e.g. Rende
 | `IDLE_CHAT_ENABLED` | Enable automated idle livestream messages | `true` | No |
 | `IDLE_CHAT_INTERVAL` | Seconds between idle livestream messages | `180` | No |
 | `GEMINI_API_KEY` | Google Gemini API Key | - | For Search/Gemini |
-| `GEMINI_MODEL` | Gemini Model with Search Grounding | `gemini-2.5-flash-lite` | No |
+| `GEMINI_MODEL` | Gemini Model with Search Grounding | `gemini-3.5-flash-lite` | No |
 | `GEMINI_SEARCH_ENABLED` | Enable Google Search Grounding | `true` | No |
 | `GEMINI_SEARCH_DAILY_LIMIT`| Daily Search Grounding Safety Allowance | `450` | No |
 | `GEMINI_SEARCH_CACHE_TTL`| Search Grounding Cache TTL (seconds) | `300` | No |
@@ -118,15 +118,18 @@ Configure these variables in your `.env` file or hosting environment (e.g. Rende
 
 ---
 
-### 🧠 Rukiya Advanced AI Engine (OpenRouter + Gemini + Google Search)
+### 🧠 Rukiya Advanced AI Engine (OpenRouter + Gemini + Google Search Grounding)
 
-Rukiya integrates a specialized multi-provider control layer:
+Rukiya integrates a production-hardened multi-provider control layer:
 - **OpenRouter**: Primary provider for conversation, personality responses, memory-driven chat, and final Rukiya-style persona rendering.
-- **Gemini (`gemini-2.5-flash-lite`)**: Grounded generation and Google Search integration via the official `google-genai` SDK and `google_search` grounding tool.
-- **Hybrid Pipeline**: For queries requiring current information, Gemini retrieves verified web search grounding and scores sources $\to$ Evidence Engine ranks and validates evidence $\to$ OpenRouter renders the concise single-sentence Rukiya personality response.
-- **Self-Critic & Bounded Repair**: Analyzes candidate responses for length, tone, factual consistency, repetition, and safety with a strict maximum of 2 repair attempts before safe fallback.
+- **Gemini (`gemini-3.5-flash-lite`)**: Grounded generation and Google Search integration via the official `google-genai` SDK and `google_search` grounding tool.
+- **Independent Capabilities**: `gemini_generation` and `gemini_search` maintain separated circuit breakers, health decay, and capability states (`AVAILABLE`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, etc.). A search outage never disables generation.
+- **Fail-Fast 429 & Negative Caching**: HTTP 429 rate limit or quota errors fail fast in milliseconds (no 15s timeout wait) and are negatively cached to prevent provider hammer.
+- **Accurate Fallback Telemetry**: When search is degraded and OpenRouter generates the answer, telemetry transparently records `planned_route="hybrid"`, `executed_route="degraded_hybrid"`, `fallback_used=True`, `fallback_reason="gemini_search_rate_limited"`, and `verified_current_information=False`.
+- **Anti-Hallucination Boundaries**: When real-time verification fails, the prompt compiler injects explicit non-fabrication directives and the Self-Critic enforces transparent admission rather than unverified live price/news claims.
 - **In-flight Deduplication & Search Caching**: Identical concurrent queries join an active in-flight task to eliminate redundant API calls.
-- **Circuit Breakers & Daily Budgeting**: Automatically trips to `OPEN` state upon repeated provider errors and enforces a default safety limit of 450 daily searches to remain safely below the free search-grounding allowance.
+- **Circuit Breakers & Daily Budgeting**: Adaptive cooldowns (60s for 429, 300s for quota, 30s for server error) with graceful shutdown hooks (`aclose()`).
+- **Live Diagnostic**: Run `python scripts/verify_gemini_search.py` to independently test live provider generation and search capabilities.
 ---
 
 ## 💻 Local Development & Installation

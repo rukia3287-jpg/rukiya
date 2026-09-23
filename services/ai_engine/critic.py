@@ -38,7 +38,9 @@ class Critic:
         request: AIEngineRequest,
         plan: Plan,
         evidence_items: Optional[List[EvidenceItem]] = None,
-        recent_responses: Optional[List[str]] = None
+        recent_responses: Optional[List[str]] = None,
+        verified_current_information: bool = True,
+        search_failed: bool = False,
     ) -> CriticReport:
         text = candidate_text.strip()
         reasons: List[str] = []
@@ -138,6 +140,18 @@ class Critic:
                     score=0.5,
                     reasons=reasons,
                     repair_instruction="Use the verified facts provided in the evidence to answer the question directly."
+                )
+
+        # 8. Anti-Hallucination on Unverified Current Information
+        if (plan.freshness_required or plan.search_required) and (not verified_current_information or search_failed):
+            price_match = re.search(r"(?:₹|\$|\b(?:rs|rupees|dollars|usd|inr)\b\s*\d+|\b\d+\s*(?:rs|rupees|dollars|inr|usd)\b|costs?\s+\d+)", text_lower)
+            if price_match:
+                reasons.append("Fabricated current price without search verification")
+                return CriticReport(
+                    verdict=CriticVerdict.REPAIR,
+                    score=0.4,
+                    reasons=reasons,
+                    repair_instruction="Do not state a fabricated price or unverified current fact. Transparently state in character that you cannot verify the live price right now."
                 )
 
         return CriticReport(

@@ -7,6 +7,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from services.ai_engine.errors import ErrorCategory, ProviderError
 from services.ai_engine.models import AIProviderResult
 from services.ai_engine.providers.base import AIProvider
 from services.config import Config
@@ -49,7 +50,14 @@ class Executor:
                 return AIProviderResult(
                     text="",
                     provider=provider.name,
-                    error=f"Timeout ({timeout}s)"
+                    error=f"Timeout ({timeout}s)",
+                    error_details=ProviderError(
+                        provider=provider.name,
+                        capability="generation",
+                        category=ErrorCategory.TIMEOUT,
+                        status_code=408,
+                        retryable=True,
+                    )
                 )
 
     async def execute_search(
@@ -79,5 +87,12 @@ class Executor:
                     text="",
                     provider=provider.name,
                     used_search=True,
-                    error=f"Search timeout ({self.search_timeout}s)"
+                    error=f"Search timeout ({self.search_timeout}s)",
+                    error_details=ProviderError(
+                        provider=provider.name,
+                        capability="search",
+                        category=ErrorCategory.TIMEOUT,
+                        status_code=408,
+                        retryable=True,
+                    )
                 )

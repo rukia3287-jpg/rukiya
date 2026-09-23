@@ -1,6 +1,6 @@
 """services/ai_engine/providers/gemini.py
 Gemini provider adapter supporting standard generation, Google Search grounding,
-and modular engines for search, grounding evaluation, and response normalization.
+independent capability states, immediate 429 fail-fast, and modular engines.
 """
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from services.ai_engine.models import AIProviderResult
+from services.ai_engine.errors import ErrorCategory, ProviderError, classify_provider_error
+from services.ai_engine.models import AIProviderResult, CapabilityState
 from services.ai_engine.providers.base import AIProvider
 from services.config import Config
 
@@ -27,7 +28,6 @@ class ClientManager:
     def __init__(self, api_key: Optional[str] = None, model: str = "gemini-3.5-flash-lite"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         raw_model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-        # Google GenAI accepts both "gemini-3.5-flash-lite" and "models/gemini-3.5-flash-lite"
         self.model = raw_model.removeprefix("models/") if raw_model.startswith("models/") else raw_model
         self._client: Optional[Any] = None
         self._sdk_available: Optional[bool] = None
@@ -78,11 +78,9 @@ class ResponseParser:
             return ""
         if isinstance(response, str):
             return response.strip()
-        # genai SDK response
         text = getattr(response, "text", None)
         if isinstance(text, str) and text.strip():
             return text.strip()
-        # Check candidates
         candidates = getattr(response, "candidates", None) or []
         for cand in candidates:
             content = getattr(cand, "content", None)
@@ -91,7 +89,6 @@ class ResponseParser:
                 text_parts = [getattr(p, "text", "") for p in parts if getattr(p, "text", "")]
                 if text_parts:
                     return "".join(text_parts).strip()
-        # Check dict format
         if isinstance(response, dict):
             if "text" in response:
                 return str(response["text"]).strip()
@@ -112,7 +109,6 @@ class ResponseParser:
             if not gm:
                 continue
 
-            # Grounding chunks contain web sources
             chunks = getattr(gm, "grounding_chunks", None) or []
             for chunk in chunks:
                 web = getattr(chunk, "web", None)
@@ -125,7 +121,6 @@ class ResponseParser:
                         "type": "web"
                     })
 
-            # Check dict format for grounding_metadata
             if isinstance(gm, dict):
                 for chunk in gm.get("grounding_chunks", []):
                     web = chunk.get("web", {})
@@ -180,15 +175,22 @@ class ResponseParser:
         response: Any,
         latency_ms: float,
         used_search: bool = False,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        error_details: Optional[ProviderError] = None
     ) -> AIProviderResult:
-        if error:
+        if error or error_details:
+            msg = error or (error_details.message if error_details else "Error")
+            cat = error_details.category if error_details else None
+            status = error_details.status_code if error_details else None
             return AIProviderResult(
                 text="",
                 provider="gemini",
                 latency_ms=latency_ms,
                 used_search=used_search,
-                error=error,
+                error=msg,
+                error_category=cat,
+                status_code=status,
+                error_details=error_details,
                 raw_response=response
             )
 
@@ -231,14 +233,12 @@ class GroundingEngine:
         if not citations:
             return 0.0
         score = 0.5
-        # Higher score for multiple diverse citations
         count = len(citations)
         if count >= 3:
             score += 0.3
         elif count >= 1:
             score += 0.15
 
-        # Check for authority domains (.org, .gov, .edu, official sites)
         has_authoritative = any(
             any(tld in c.get("url", "").lower() for tld in [".gov", ".edu", ".org", "wiki", "official"])
             for c in citations
@@ -250,11 +250,9 @@ class GroundingEngine:
 
     @staticmethod
     def detect_source_conflict(sources: List[Dict[str, Any]]) -> bool:
-        """Detect numeric or date contradictions among sources."""
         if len(sources) < 2:
             return False
 
-        # Extract dates or version patterns (e.g. v2.4 vs v2.5, or release dates)
         version_pattern = re.compile(r"\bv?(\d+\.\d+(\.\d+)?)\b", re.IGNORECASE)
         found_versions = set()
         for src in sources:
@@ -267,10 +265,10 @@ class GroundingEngine:
 
 
 # ─────────────────────────────────────────────────────────────
-# 4. Search Engine
+# 4. Search Engine (With 429 Fail-Fast & AFC Warning Mitigation)
 # ─────────────────────────────────────────────────────────────
 class SearchEngine:
-    """Executes Google Search grounding via Gemini API."""
+    """Executes Google Search grounding via Gemini API with immediate 429 fail-fast."""
 
     def __init__(self, client_manager: ClientManager, response_parser: ResponseParser):
         self.client_manager = client_manager
@@ -287,11 +285,14 @@ class SearchEngine:
         start_time = time.time()
         client = self.client_manager.get_client()
         if not client:
+            err = ProviderError(
+                provider="gemini",
+                capability="search",
+                category=ErrorCategory.AUTH_ERROR,
+                message="Gemini client unavailable or unconfigured"
+            )
             return self.response_parser.normalize_response(
-                None,
-                (time.time() - start_time) * 1000.0,
-                used_search=True,
-                error="Gemini client unavailable or unconfigured"
+                None, (time.time() - start_time) * 1000.0, used_search=True, error_details=err
             )
 
         prompt = query
@@ -299,51 +300,82 @@ class SearchEngine:
             prompt = f"Context:\n{context}\n\nUser Question: {query}"
 
         try:
-            # Official google-genai SDK call
-            # GenerateContentConfig with google_search tool
-            def _call_gemini_search():
-                try:
-                    from google.genai import types  # type: ignore
-                    config = types.GenerateContentConfig(
-                        tools=[{"google_search": {}}],
-                        temperature=0.3,
-                        max_output_tokens=max_tokens,
-                        system_instruction=system_instruction
-                    )
-                    return client.models.generate_content(
-                        model=self.client_manager.model,
-                        contents=prompt,
-                        config=config
-                    )
-                except Exception:
-                    # Fallback syntax if mock or dict-based client
-                    if hasattr(client, "generate_content"):
-                        return client.generate_content(prompt, tools=["google_search"])
-                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
+            async def _execute_search():
+                # 1. Check if native async client exists (client.aio)
+                if hasattr(client, "aio") and hasattr(client.aio, "models"):
+                    try:
+                        from google.genai import types  # type: ignore
+                        cfg_kwargs = {
+                            "tools": [{"google_search": {}}],
+                            "temperature": 0.3,
+                            "max_output_tokens": max_tokens,
+                            "system_instruction": system_instruction,
+                        }
+                        # Disable AFC warning: search grounding does not need client-side AFC loop
+                        if hasattr(types, "AutomaticFunctionCallingConfig"):
+                            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+                        config = types.GenerateContentConfig(**cfg_kwargs)
+                        return await client.aio.models.generate_content(
+                            model=self.client_manager.model,
+                            contents=prompt,
+                            config=config
+                        )
+                    except Exception:
+                        pass
+
+                # 2. Synchronous fallback run inside executor with fast exception capture
+                def _sync_call():
+                    try:
+                        from google.genai import types  # type: ignore
+                        cfg_kwargs = {
+                            "tools": [{"google_search": {}}],
+                            "temperature": 0.3,
+                            "max_output_tokens": max_tokens,
+                            "system_instruction": system_instruction,
+                        }
+                        if hasattr(types, "AutomaticFunctionCallingConfig"):
+                            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+                        config = types.GenerateContentConfig(**cfg_kwargs)
                         return client.models.generate_content(
                             model=self.client_manager.model,
-                            contents=prompt
+                            contents=prompt,
+                            config=config
                         )
-                    raise
+                    except Exception:
+                        if hasattr(client, "generate_content"):
+                            return client.generate_content(prompt, tools=["google_search"])
+                        if hasattr(client, "models") and hasattr(client.models, "generate_content"):
+                            return client.models.generate_content(
+                                model=self.client_manager.model,
+                                contents=prompt
+                            )
+                        raise
 
-            loop = asyncio.get_running_loop()
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(None, _call_gemini_search),
-                timeout=timeout
-            )
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, _sync_call)
+
+            resp = await asyncio.wait_for(_execute_search(), timeout=timeout)
             latency_ms = (time.time() - start_time) * 1000.0
             return self.response_parser.normalize_response(resp, latency_ms, used_search=True)
 
         except asyncio.TimeoutError:
             latency_ms = (time.time() - start_time) * 1000.0
+            err = classify_provider_error(
+                f"Gemini search request timed out ({timeout}s)",
+                status_code=504,
+                provider="gemini",
+                capability="search"
+            )
             return self.response_parser.normalize_response(
-                None, latency_ms, used_search=True, error=f"Gemini search timeout ({timeout}s)"
+                None, latency_ms, used_search=True, error_details=err
             )
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000.0
-            logger.warning("Gemini search exception: %s", e)
+            # FAIL FAST: classify error immediately (429, 403, 401, etc.)
+            err = classify_provider_error(e, provider="gemini", capability="search")
+            logger.warning("Gemini search exception: %s (category=%s, status=%s)", e, err.category.value, err.status_code)
             return self.response_parser.normalize_response(
-                None, latency_ms, used_search=True, error=f"Gemini search error: {str(e)}"
+                None, latency_ms, used_search=True, error_details=err
             )
 
 
@@ -368,65 +400,91 @@ class GenerationEngine:
         start_time = time.time()
         client = self.client_manager.get_client()
         if not client:
+            err = ProviderError(
+                provider="gemini",
+                capability="generation",
+                category=ErrorCategory.AUTH_ERROR,
+                message="Gemini client unavailable or unconfigured"
+            )
             return self.response_parser.normalize_response(
-                None,
-                (time.time() - start_time) * 1000.0,
-                used_search=False,
-                error="Gemini client unavailable or unconfigured"
+                None, (time.time() - start_time) * 1000.0, used_search=False, error_details=err
             )
 
         try:
-            def _call_gemini():
-                try:
-                    from google.genai import types  # type: ignore
-                    config = types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_tokens,
-                        system_instruction=system_instruction
-                    )
-                    return client.models.generate_content(
-                        model=self.client_manager.model,
-                        contents=contents,
-                        config=config
-                    )
-                except Exception:
-                    if hasattr(client, "generate_content"):
-                        return client.generate_content(contents)
-                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
+            async def _execute_generate():
+                if hasattr(client, "aio") and hasattr(client.aio, "models"):
+                    try:
+                        from google.genai import types  # type: ignore
+                        config = types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                            system_instruction=system_instruction
+                        )
+                        return await client.aio.models.generate_content(
+                            model=self.client_manager.model,
+                            contents=contents,
+                            config=config
+                        )
+                    except Exception:
+                        pass
+
+                def _call_gemini():
+                    try:
+                        from google.genai import types  # type: ignore
+                        config = types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_tokens,
+                            system_instruction=system_instruction
+                        )
                         return client.models.generate_content(
                             model=self.client_manager.model,
-                            contents=contents
+                            contents=contents,
+                            config=config
                         )
-                    raise
+                    except Exception:
+                        if hasattr(client, "generate_content"):
+                            return client.generate_content(contents)
+                        if hasattr(client, "models") and hasattr(client.models, "generate_content"):
+                            return client.models.generate_content(
+                                model=self.client_manager.model,
+                                contents=contents
+                            )
+                        raise
 
-            loop = asyncio.get_running_loop()
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(None, _call_gemini),
-                timeout=timeout
-            )
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(None, _call_gemini)
+
+            resp = await asyncio.wait_for(_execute_generate(), timeout=timeout)
             latency_ms = (time.time() - start_time) * 1000.0
             return self.response_parser.normalize_response(resp, latency_ms, used_search=False)
 
         except asyncio.TimeoutError:
             latency_ms = (time.time() - start_time) * 1000.0
+            err = classify_provider_error(
+                f"Gemini generation timeout ({timeout}s)",
+                status_code=504,
+                provider="gemini",
+                capability="generation"
+            )
             return self.response_parser.normalize_response(
-                None, latency_ms, used_search=False, error=f"Gemini generation timeout ({timeout}s)"
+                None, latency_ms, used_search=False, error_details=err
             )
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000.0
-            logger.warning("Gemini generation exception: %s", e)
+            err = classify_provider_error(e, provider="gemini", capability="generation")
+            logger.warning("Gemini generation exception: %s (category=%s)", e, err.category.value)
             return self.response_parser.normalize_response(
-                None, latency_ms, used_search=False, error=f"Gemini generation error: {str(e)}"
+                None, latency_ms, used_search=False, error_details=err
             )
 
 
 # ─────────────────────────────────────────────────────────────
-# 6. Gemini Provider (Composite Adapter)
+# 6. Gemini Provider (Composite Adapter with Independent Capabilities)
 # ─────────────────────────────────────────────────────────────
 class GeminiProvider(AIProvider):
     """
     Composite Gemini Provider coordinating ClientManager, GenerationEngine,
-    SearchEngine, GroundingEngine, and ResponseParser.
+    SearchEngine, GroundingEngine, and ResponseParser with independent capabilities.
     """
 
     name: str = "gemini"
@@ -451,8 +509,27 @@ class GeminiProvider(AIProvider):
         self.generation_engine = GenerationEngine(self.client_manager, self.response_parser)
         self.search_engine = SearchEngine(self.client_manager, self.response_parser)
 
+        # Independent capability tracking
+        self.generation_capability: CapabilityState = CapabilityState.AVAILABLE
+        self.search_capability: CapabilityState = CapabilityState.AVAILABLE
+
     def is_configured(self) -> bool:
         return self.client_manager.health_check()
+
+    def is_generation_available(self) -> bool:
+        return self.is_configured() and self.generation_capability not in (
+            CapabilityState.DISABLED, CapabilityState.AUTH_FAILED
+        )
+
+    def is_search_available(self) -> bool:
+        search_enabled = getattr(self.config, "gemini_search_enabled", True)
+        return (
+            self.is_configured()
+            and search_enabled
+            and self.search_capability not in (
+                CapabilityState.DISABLED, CapabilityState.AUTH_FAILED, CapabilityState.RATE_LIMITED
+            )
+        )
 
     async def generate(
         self,
@@ -461,8 +538,6 @@ class GeminiProvider(AIProvider):
         temperature: float = 0.85,
         **kwargs: Any
     ) -> AIProviderResult:
-        """Format messages and execute generation."""
-        # Convert messages list to prompt / contents
         system_instruction = None
         user_parts: List[str] = []
         for m in messages:
@@ -474,13 +549,20 @@ class GeminiProvider(AIProvider):
                 user_parts.append(f"{role.capitalize()}: {content}")
 
         contents = "\n\n".join(user_parts) if user_parts else (system_instruction or "")
-        return await self.generation_engine.generate(
+        res = await self.generation_engine.generate(
             contents=contents,
             system_instruction=system_instruction,
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=self.timeout
         )
+        if res.error_category == ErrorCategory.RATE_LIMITED:
+            self.generation_capability = CapabilityState.RATE_LIMITED
+        elif res.error_category == ErrorCategory.AUTH_ERROR:
+            self.generation_capability = CapabilityState.AUTH_FAILED
+        elif res.error_category is None:
+            self.generation_capability = CapabilityState.AVAILABLE
+        return res
 
     async def search_grounded(
         self,
@@ -490,14 +572,22 @@ class GeminiProvider(AIProvider):
         max_tokens: int = 250,
         **kwargs: Any
     ) -> AIProviderResult:
-        """Execute search-grounded content generation via Google Search grounding."""
-        return await self.search_engine.search(
+        res = await self.search_engine.search(
             query=query,
             system_instruction=system_instruction,
             context=context,
             max_tokens=max_tokens,
             timeout=self.search_timeout
         )
+        if res.error_category == ErrorCategory.RATE_LIMITED:
+            self.search_capability = CapabilityState.RATE_LIMITED
+        elif res.error_category == ErrorCategory.QUOTA_EXHAUSTED:
+            self.search_capability = CapabilityState.QUOTA_EXHAUSTED
+        elif res.error_category == ErrorCategory.AUTH_ERROR:
+            self.search_capability = CapabilityState.AUTH_FAILED
+        elif res.error_category is None:
+            self.search_capability = CapabilityState.AVAILABLE
+        return res
 
     async def health_check(self) -> bool:
         return self.client_manager.health_check()

@@ -37,6 +37,18 @@ class BudgetManager:
         self.user_counts: Dict[str, int] = {}
         self.current_date: str = self._get_today()
 
+    @property
+    def daily_searches(self) -> int:
+        return self.search_count
+
+    @daily_searches.setter
+    def daily_searches(self, value: int) -> None:
+        self.search_count = value
+
+    @property
+    def max_daily_searches(self) -> int:
+        return self.daily_search_limit
+
     @staticmethod
     def _get_today() -> str:
         return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")

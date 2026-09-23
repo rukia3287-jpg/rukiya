@@ -55,7 +55,11 @@ class ContextCompiler:
         request: AIEngineRequest,
         plan: Plan,
         evidence_items: Optional[List[EvidenceItem]] = None,
-        repair_instruction: Optional[str] = None
+        repair_instruction: Optional[str] = None,
+        search_attempted: bool = False,
+        search_succeeded: bool = False,
+        search_failure_reason: Optional[str] = None,
+        verified_current_information: bool = False,
     ) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": f"{RUKIYA_SYSTEM_PROMPT}\n\n{INJECTION_GUARD_PROMPT}"}
@@ -104,7 +108,7 @@ class ContextCompiler:
                     "<recent_chat_history>\n" + "\n".join(history_lines) + "\n</recent_chat_history>"
                 )
 
-        # 4. Verified Web Evidence (<= 5 sources)
+        # 4. Verified Web Evidence (<= 5 sources) or Search Failure Status
         if evidence_items:
             evidence_lines = []
             for i, ev in enumerate(evidence_items[:5], 1):
@@ -116,6 +120,15 @@ class ContextCompiler:
                     + "\n".join(evidence_lines)
                     + "\n</evidence_data>"
                 )
+        elif search_attempted and not search_succeeded:
+            context_blocks.append(
+                f"<search_status>\n"
+                f"search_attempted=true\n"
+                f"search_succeeded=false\n"
+                f"verified_current_information=false\n"
+                f"search_failure_reason={search_failure_reason or 'rate_limited'}\n"
+                f"</search_status>"
+            )
 
         # 5. Tone and instruction tuning
         prompt_instruction = "Reply as Rukiya in one short sentence. 1-3 short sentences MAX."
@@ -123,11 +136,24 @@ class ContextCompiler:
             prompt_instruction = "Welcome the viewer in character as Rukiya. 1 short sentence."
         elif plan.intent == "compliment":
             prompt_instruction = "Respond to compliment with restrained, dry tsundere deflection. 1 short sentence."
-        elif plan.freshness_required or plan.search_required:
+        elif (plan.freshness_required or plan.search_required) and search_attempted and not search_succeeded:
             prompt_instruction = (
-                "Answer the viewer using the verified evidence above in one short Rukiya-style sentence. "
-                "Do NOT quote URLs or robotic citations in chat. If evidence is uncertain, admit it briskly."
+                "CRITICAL ANTI-HALLUCINATION DIRECTIVE: Real-time search verification failed and fresh information could not be verified "
+                f"({search_failure_reason or 'search unavailable'}). You MUST NOT guess, invent, fabricate, or hallucinate current real-time facts, "
+                "live prices, today's news, or current release statuses. Transparently and briskly state in Rukiya's character that you cannot "
+                "verify the latest/current information right now."
             )
+        elif plan.freshness_required or plan.search_required:
+            if evidence_items:
+                prompt_instruction = (
+                    "Answer the viewer using the verified evidence above in one short Rukiya-style sentence. "
+                    "Do NOT quote URLs or robotic citations in chat. If evidence is uncertain, admit it briskly."
+                )
+            else:
+                prompt_instruction = (
+                    "CRITICAL: No verified current information was found. Do NOT fabricate real-time facts or prices. "
+                    "Admit briskly in character that you cannot verify the latest information right now."
+                )
 
         if repair_instruction:
             prompt_instruction += f"\nCORRECTION REQUIRED: {repair_instruction}"

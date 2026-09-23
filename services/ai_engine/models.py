@@ -9,12 +9,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from services.ai_engine.errors import ErrorCategory, ProviderError
+
 
 class RouteType(str, Enum):
     OPENROUTER_DIRECT = "openrouter_direct"
     GEMINI_DIRECT = "gemini_direct"
     GEMINI_SEARCH = "gemini_search"
     HYBRID = "hybrid"
+    DEGRADED_HYBRID = "degraded_hybrid"
     CONSENSUS = "consensus"
     BACKUP = "backup"
     STATIC_FALLBACK = "static_fallback"
@@ -39,6 +42,33 @@ class CircuitState(str, Enum):
     HALF_OPEN = "half_open"
 
 
+class CapabilityState(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    RATE_LIMITED = "RATE_LIMITED"
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+    AUTH_FAILED = "AUTH_FAILED"
+    DISABLED = "DISABLED"
+    TEMPORARILY_UNAVAILABLE = "TEMPORARILY_UNAVAILABLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class RequestPriority(str, Enum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+@dataclass
+class ModelCapabilities:
+    """Metadata tracking capabilities of a specific provider model."""
+    model_name: str
+    supports_generation: bool = True
+    supports_search: bool = False
+    supports_structured: bool = True
+    cost_class: str = "low"
+    latency_class: str = "fast"
+
+
 @dataclass
 class SearchQuery:
     """Planned search query with category for dynamic TTL and scoping."""
@@ -55,6 +85,9 @@ class SearchResult:
     sources: List[Dict[str, Any]] = field(default_factory=list)
     citations: List[Dict[str, Any]] = field(default_factory=list)
     timestamp: float = field(default_factory=time.time)
+    success: bool = True
+    error: Optional[str] = None
+    error_details: Optional[Any] = None
 
 
 @dataclass
@@ -82,6 +115,9 @@ class AIProviderResult:
     confidence: Optional[float] = None
     grounding_metadata: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    error_category: Optional[ErrorCategory] = None
+    status_code: Optional[int] = None
+    error_details: Optional[ProviderError] = None
     raw_response: Optional[Any] = None
 
 
@@ -117,6 +153,7 @@ class AIEngineRequest:
     user_id: Optional[str] = None
     canonical_id: Optional[str] = None
     intent: Optional[str] = None
+    priority: RequestPriority = RequestPriority.HIGH
     bypass_trigger: bool = False
     bypass_cooldown: bool = False
     persistent_memory: Optional[List[Any]] = None
@@ -127,18 +164,34 @@ class AIEngineRequest:
 
 @dataclass
 class AIEngineResult:
-    """Comprehensive, safe result returned by the AI Engine."""
+    """Comprehensive, safe result returned by the AI Engine with route and telemetry breakdown."""
     text: str
-    provider: str
-    route: str
+    provider: str = "none"
+    route: str = "unknown"
+    planned_route: str = ""
+    executed_route: str = ""
+    final_provider: str = ""
     used_search: bool = False
+    search_attempted: bool = False
+    search_succeeded: bool = False
+    verified_current_information: bool = False
     citations: List[Dict[str, Any]] = field(default_factory=list)
     evidence_quality: Optional[float] = None
     confidence: Optional[float] = None
     latency_ms: float = 0.0
     fallback_used: bool = False
+    fallback_reason: Optional[str] = None
     cache_hit: bool = False
     repair_count: int = 0
     cost_class: str = "low"
     request_id: str = ""
     error: Optional[str] = None
+
+    def __post_init__(self):
+        # Sync backwards compatible aliases if not explicitly populated
+        if not self.planned_route and self.route:
+            self.planned_route = self.route
+        if not self.executed_route and self.route:
+            self.executed_route = self.route
+        if not self.final_provider and self.provider:
+            self.final_provider = self.provider

@@ -4,14 +4,16 @@ evidence ranking, self-criticism, and repair loops.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from services.ai_engine.budget import BudgetManager
 from services.ai_engine.cache import InFlightDeduplicator, SearchResultCache
 from services.ai_engine.context_compiler import ContextCompiler
 from services.ai_engine.critic import Critic
+from services.ai_engine.errors import ErrorCategory, ProviderError, classify_provider_error
 from services.ai_engine.evidence_engine import EvidenceEngine
 from services.ai_engine.executor import Executor
 from services.ai_engine.health import ProviderHealthTracker
@@ -93,31 +95,109 @@ class AIEngine:
         category: str = "general",
         time_scope: str = ""
     ) -> Tuple[SearchResult, bool]:
-        """Fetch search result from cache, in-flight task, or Gemini provider."""
-        # 1. Check cache
+        """Fetch search result from positive cache, negative cache, in-flight task, or Gemini provider."""
+        # 1. Check positive cache
         cached = self.cache.get(query, time_scope=time_scope)
         if cached:
             logger.debug("Search cache hit for query: '%s'", query)
             return cached, True
 
-        # 2. In-flight request deduplication
+        # 2. Check negative cache (fast fail during outage/rate-limit)
+        neg = self.cache.get_negative(query)
+        if neg:
+            logger.info("Search negative cache hit for query '%s' (category=%s, retry_after=%.1fs)", query, neg.category.value, neg.retry_after - time.time())
+            return SearchResult(
+                query=query,
+                text="",
+                sources=[],
+                citations=[],
+                success=False,
+                error=neg.error_message,
+                error_details=ProviderError(
+                    provider="gemini",
+                    capability="search",
+                    category=neg.category,
+                    retryable=False
+                )
+            ), False
+
+        # 3. Check circuit breaker specifically for gemini:search
+        if not self.health_tracker.is_available("gemini:search") and "gemini:search" in getattr(self.health_tracker, "circuits", {}):
+            logger.warning("Circuit breaker OPEN for gemini:search; fast-failing query '%s'", query)
+            return SearchResult(
+                query=query,
+                text="",
+                sources=[],
+                citations=[],
+                success=False,
+                error="Circuit breaker OPEN for gemini:search",
+                error_details=ProviderError(
+                    provider="gemini",
+                    capability="search",
+                    category=ErrorCategory.RATE_LIMITED,
+                    retryable=False
+                )
+            ), False
+
         gemini = self.registry.get("gemini")
         if not gemini or not gemini.is_configured():
-            return SearchResult(query=query, text="", sources=[]), False
+            return SearchResult(
+                query=query,
+                text="",
+                sources=[],
+                citations=[],
+                success=False,
+                error="Gemini provider not configured",
+                error_details=ProviderError(
+                    provider="gemini",
+                    capability="search",
+                    category=ErrorCategory.AUTH_ERROR,
+                    retryable=False
+                )
+            ), False
 
-        async def _fetch():
+        # 4. In-flight request deduplication
+        async def _fetch() -> SearchResult:
             res = await self.executor.execute_search(gemini, query=query)
+            err_details = getattr(res, "error_details", None)
+            if res.error and not err_details:
+                err_details = classify_provider_error(res.error, provider="gemini", capability="search")
+
+            is_success = not bool(res.error) and bool(res.text or res.citations)
+            self.health_tracker.record_call(
+                "gemini:search",
+                is_success,
+                res.latency_ms,
+                error=err_details
+            )
+
+            if not is_success:
+                cat = err_details.category if err_details else ErrorCategory.UNKNOWN
+                # Store in negative cache so subsequent calls fail fast without network spam
+                self.cache.set_negative(query, category=cat, error_message=str(res.error))
+                return SearchResult(
+                    query=query,
+                    text="",
+                    sources=[],
+                    citations=[],
+                    success=False,
+                    error=res.error or "Search execution returned empty result",
+                    error_details=err_details
+                )
+
             sources = res.citations or []
             sr = SearchResult(
                 query=query,
                 text=res.text,
                 sources=sources,
-                citations=sources
+                citations=sources,
+                success=True,
+                error=None,
+                error_details=None
             )
-            # Record in budget & cache
+            # Record in budget & positive cache
             self.budget_manager.record_search()
             self.cache.set(query, sr, category=category, time_scope=time_scope)
-            self.health_tracker.record_call("gemini", not bool(res.error), res.latency_ms)
             return sr
 
         result = await self.deduplicator.execute_or_join(query, _fetch)
@@ -138,16 +218,23 @@ class AIEngine:
             request_id, route.value, plan.intent, plan.complexity, plan.search_required
         )
 
-        candidate_text = ""
+        planned_route = route.value
+        executed_route = route.value
         provider_used = "none"
-        used_search = False
+        final_provider = "none"
+        search_attempted = False
+        search_succeeded = False
+        verified_current_information = False
+        fallback_used = False
+        fallback_reason: Optional[str] = None
+
+        candidate_text = ""
         cache_hit = False
         citations: List[dict] = []
         evidence_items: List[EvidenceItem] = []
         evidence_quality: Optional[float] = None
         error_msg: Optional[str] = None
         repair_count = 0
-        fallback_used = False
 
         openrouter = self.registry.get("openrouter")
         gemini = self.registry.get("gemini")
@@ -157,13 +244,16 @@ class AIEngine:
             if route == RouteType.STATIC_FALLBACK:
                 candidate_text = self.get_fallback(plan.intent)
                 fallback_used = True
+                fallback_reason = "static_fallback"
                 provider_used = "static_fallback"
+                final_provider = "static_fallback"
 
             elif route == RouteType.OPENROUTER_DIRECT:
                 provider_used = "openrouter"
+                final_provider = "openrouter"
                 messages = self.compiler.compile(request, plan)
                 res = await self.executor.execute_generate(openrouter, messages)  # type: ignore
-                self.health_tracker.record_call("openrouter", not bool(res.error), res.latency_ms)
+                self.health_tracker.record_call("openrouter:generation", not bool(res.error), res.latency_ms, error=res.error_details)
 
                 if res.text and not res.error:
                     candidate_text = res.text
@@ -171,35 +261,49 @@ class AIEngine:
                 else:
                     # Automatic BACKUP to Gemini
                     logger.warning("OpenRouter failed; triggering BACKUP route to Gemini.")
-                    if gemini and self.health_tracker.is_available("gemini"):
+                    fallback_used = True
+                    fallback_reason = "openrouter_failed"
+                    if gemini and self.health_tracker.is_available("gemini:generation"):
                         b_res = await self.executor.execute_generate(gemini, messages)
-                        self.health_tracker.record_call("gemini", not bool(b_res.error), b_res.latency_ms)
+                        self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                             provider_used = "gemini_backup"
+                            final_provider = "gemini_backup"
+                            executed_route = "backup"
+                            fallback_used = False
+                            fallback_reason = None
                             self.budget_manager.record_generation("gemini", request.user_id)
                         else:
                             candidate_text = self.get_fallback(plan.intent)
-                            fallback_used = True
+                            provider_used = "static_fallback"
+                            final_provider = "static_fallback"
+                            executed_route = "static_fallback"
                     else:
                         candidate_text = self.get_fallback(plan.intent)
-                        fallback_used = True
+                        provider_used = "static_fallback"
+                        final_provider = "static_fallback"
+                        executed_route = "static_fallback"
 
             elif route in (RouteType.GEMINI_DIRECT, RouteType.BACKUP):
                 provider_used = "gemini"
+                final_provider = "gemini"
                 messages = self.compiler.compile(request, plan)
                 res = await self.executor.execute_generate(gemini, messages)  # type: ignore
-                self.health_tracker.record_call("gemini", not bool(res.error), res.latency_ms)
+                self.health_tracker.record_call("gemini:generation", not bool(res.error), res.latency_ms, error=res.error_details)
 
                 if res.text and not res.error:
                     candidate_text = res.text
                     self.budget_manager.record_generation("gemini", request.user_id)
                 else:
                     candidate_text = self.get_fallback(plan.intent)
+                    provider_used = "static_fallback"
+                    final_provider = "static_fallback"
                     fallback_used = True
+                    fallback_reason = "gemini_generation_failed"
 
             elif route in (RouteType.HYBRID, RouteType.GEMINI_SEARCH, RouteType.CONSENSUS):
-                used_search = True
+                search_attempted = True
                 query_to_search = plan.search_queries[0].query if plan.search_queries else request.text
                 category = plan.search_queries[0].category if plan.search_queries else "general"
                 time_scope = plan.search_queries[0].time_scope if plan.search_queries else ""
@@ -209,60 +313,147 @@ class AIEngine:
                 )
                 cache_hit = hit
                 citations = sr.citations
+                search_succeeded = bool(sr.success and (sr.text.strip() or sr.sources))
 
-                # Evaluate and Rank Evidence
-                evidence_items = self.evidence_engine.evaluate_sources(sr.sources, query_to_search)
-                has_conflict, _ = self.evidence_engine.detect_conflicts(evidence_items)
-                evidence_quality = self.evidence_engine.calculate_evidence_quality(evidence_items, has_conflict)
+                if search_succeeded:
+                    verified_current_information = True
+                    evidence_items = self.evidence_engine.evaluate_sources(sr.sources, query_to_search)
+                    has_conflict, _ = self.evidence_engine.detect_conflicts(evidence_items)
+                    evidence_quality = self.evidence_engine.calculate_evidence_quality(evidence_items, has_conflict)
 
-                if route == RouteType.GEMINI_SEARCH or not openrouter or not self.health_tracker.is_available("openrouter"):
-                    # Use Gemini result directly or format from evidence
-                    provider_used = "gemini_search"
-                    if sr.text.strip():
-                        candidate_text = sr.text.strip()
+                    if route == RouteType.GEMINI_SEARCH or not openrouter or not self.health_tracker.is_available("openrouter:generation"):
+                        provider_used = "gemini_search"
+                        final_provider = "gemini_search"
+                        if sr.text.strip():
+                            candidate_text = sr.text.strip()
+                        else:
+                            candidate_text = self.get_fallback("search_unavailable")
+                            provider_used = "static_fallback"
+                            final_provider = "static_fallback"
+                            fallback_used = True
+                            fallback_reason = "gemini_search_empty"
+                    else:
+                        # HYBRID / CONSENSUS: OpenRouter synthesizes evidence into Rukiya persona
+                        provider_used = "hybrid (gemini+openrouter)"
+                        final_provider = "openrouter"
+                        hybrid_messages = self.compiler.compile(
+                            request=request,
+                            plan=plan,
+                            evidence_items=evidence_items,
+                            search_attempted=True,
+                            search_succeeded=True,
+                            verified_current_information=True
+                        )
+                        gen_res = await self.executor.execute_generate(openrouter, hybrid_messages)
+                        self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
+                        if gen_res.text and not gen_res.error:
+                            candidate_text = gen_res.text
+                            self.budget_manager.record_generation("openrouter", request.user_id)
+                        elif sr.text.strip():
+                            candidate_text = sr.text.strip()
+                            provider_used = "gemini_search"
+                            final_provider = "gemini_search"
+                            fallback_used = True
+                            fallback_reason = "openrouter_failed"
+                        else:
+                            candidate_text = self.get_fallback(plan.intent)
+                            provider_used = "static_fallback"
+                            final_provider = "static_fallback"
+                            fallback_used = True
+                            fallback_reason = "all_providers_failed"
+                else:
+                    # Search failed fast (e.g. 429 rate limit or quota exceeded)
+                    verified_current_information = False
+                    fallback_used = True
+                    executed_route = "degraded_hybrid" if route in (RouteType.HYBRID, RouteType.CONSENSUS) else "degraded_search"
+                    err_cat = sr.error_details.category.value if sr.error_details else "failed"
+                    fallback_reason = f"gemini_search_{err_cat.lower()}"
+
+                    # Provide structured failure context to final generator with strict anti-hallucination directive
+                    if openrouter and self.health_tracker.is_available("openrouter:generation"):
+                        provider_used = "degraded_hybrid (openrouter)"
+                        final_provider = "openrouter"
+                        hybrid_messages = self.compiler.compile(
+                            request=request,
+                            plan=plan,
+                            evidence_items=[],
+                            search_attempted=True,
+                            search_succeeded=False,
+                            search_failure_reason=fallback_reason,
+                            verified_current_information=False
+                        )
+                        gen_res = await self.executor.execute_generate(openrouter, hybrid_messages)
+                        self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
+                        if gen_res.text and not gen_res.error:
+                            candidate_text = gen_res.text
+                            self.budget_manager.record_generation("openrouter", request.user_id)
+                        elif gemini and self.health_tracker.is_available("gemini:generation"):
+                            b_res = await self.executor.execute_generate(gemini, hybrid_messages)
+                            self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
+                            if b_res.text and not b_res.error:
+                                candidate_text = b_res.text
+                                provider_used = "degraded_hybrid (gemini)"
+                                final_provider = "gemini"
+                                self.budget_manager.record_generation("gemini", request.user_id)
+                            else:
+                                candidate_text = self.get_fallback("search_unavailable")
+                                provider_used = "static_fallback"
+                                final_provider = "static_fallback"
+                        else:
+                            candidate_text = self.get_fallback("search_unavailable")
+                            provider_used = "static_fallback"
+                            final_provider = "static_fallback"
+                    elif gemini and self.health_tracker.is_available("gemini:generation"):
+                        provider_used = "degraded_hybrid (gemini)"
+                        final_provider = "gemini"
+                        hybrid_messages = self.compiler.compile(
+                            request=request,
+                            plan=plan,
+                            evidence_items=[],
+                            search_attempted=True,
+                            search_succeeded=False,
+                            search_failure_reason=fallback_reason,
+                            verified_current_information=False
+                        )
+                        b_res = await self.executor.execute_generate(gemini, hybrid_messages)
+                        self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
+                        if b_res.text and not b_res.error:
+                            candidate_text = b_res.text
+                            self.budget_manager.record_generation("gemini", request.user_id)
+                        else:
+                            candidate_text = self.get_fallback("search_unavailable")
+                            provider_used = "static_fallback"
+                            final_provider = "static_fallback"
                     else:
                         candidate_text = self.get_fallback("search_unavailable")
-                        fallback_used = True
-                else:
-                    # HYBRID / CONSENSUS: OpenRouter synthesizes evidence into Rukiya persona
-                    provider_used = "hybrid (gemini+openrouter)"
-                    hybrid_messages = self.compiler.compile(
-                        request=request,
-                        plan=plan,
-                        evidence_items=evidence_items
-                    )
-                    gen_res = await self.executor.execute_generate(openrouter, hybrid_messages)
-                    self.health_tracker.record_call("openrouter", not bool(gen_res.error), gen_res.latency_ms)
-                    if gen_res.text and not gen_res.error:
-                        candidate_text = gen_res.text
-                        self.budget_manager.record_generation("openrouter", request.user_id)
-                    elif sr.text.strip():
-                        # OpenRouter failed in hybrid, use Gemini search output
-                        candidate_text = sr.text.strip()
-                    else:
-                        candidate_text = self.get_fallback(plan.intent)
-                        fallback_used = True
+                        provider_used = "static_fallback"
+                        final_provider = "static_fallback"
 
         except Exception as e:
             logger.exception("AI Engine execution exception: %s", e)
             candidate_text = self.get_fallback(plan.intent)
             fallback_used = True
+            fallback_reason = "exception"
+            provider_used = "static_fallback"
+            final_provider = "static_fallback"
             error_msg = str(e)
 
         # 4. Self-Critic & Repair Loop
-        if not fallback_used and candidate_text:
+        if candidate_text and final_provider != "static_fallback":
             report = self.critic.evaluate(
                 candidate_text,
                 request=request,
                 plan=plan,
-                evidence_items=evidence_items
+                evidence_items=evidence_items,
+                verified_current_information=verified_current_information,
+                search_failed=(search_attempted and not search_succeeded)
             )
             if report.verdict == CriticVerdict.REPAIR:
                 logger.info("Critic requested REPAIR: %s", report.reasons)
 
                 # Generator lambda for repair
                 async def _repair_gen(msgs: List[dict]) -> AIProviderResult:
-                    target_prov = openrouter if "openrouter" in provider_used else (gemini or openrouter)
+                    target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
                     return await self.executor.execute_generate(target_prov, msgs)  # type: ignore
 
                 repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
@@ -280,13 +471,17 @@ class AIEngine:
 
                 if final_report.verdict != CriticVerdict.PASS:
                     logger.warning("Repair loop exhausted; adopting safe fallback.")
-                    candidate_text = self.get_fallback(plan.intent)
+                    candidate_text = self.get_fallback(plan.intent if not (search_attempted and not search_succeeded) else "search_unavailable")
                     fallback_used = True
+                    fallback_reason = "critic_repair_exhausted"
+                    final_provider = "static_fallback"
 
             elif report.verdict == CriticVerdict.REJECT:
                 logger.warning("Critic REJECTED response due to safety: %s", report.reasons)
                 candidate_text = self.get_fallback(plan.intent)
                 fallback_used = True
+                fallback_reason = "critic_rejected"
+                final_provider = "static_fallback"
 
         # 5. Output Validation
         if not fallback_used:
@@ -302,23 +497,38 @@ class AIEngine:
         total_latency_ms = (time.time() - start_time) * 1000.0
 
         logger.info(
-            "event=ai_engine_result req_id=%s provider=%s route=%s search=%s hit=%s repairs=%d fallback=%s latency_ms=%.1f",
-            request_id, provider_used, route.value, used_search, cache_hit, repair_count, fallback_used, total_latency_ms
+            "event=ai_engine_result req_id=%s planned_route=%s executed_route=%s provider=%s search_attempted=%s search_succeeded=%s verified_current=%s fallback=%s fallback_reason=%s hit=%s repairs=%d latency_ms=%.1f",
+            request_id, planned_route, executed_route, final_provider, search_attempted, search_succeeded, verified_current_information, fallback_used, fallback_reason, cache_hit, repair_count, total_latency_ms
         )
 
         return AIEngineResult(
             text=validated,
             provider=provider_used,
-            route=route.value,
-            used_search=used_search,
+            route=executed_route,
+            used_search=search_attempted,
             citations=citations,
             evidence_quality=evidence_quality,
-            confidence=0.9 if not fallback_used else 0.5,
+            confidence=0.9 if (not fallback_used and (not search_attempted or search_succeeded)) else 0.5,
             latency_ms=total_latency_ms,
             fallback_used=fallback_used,
             cache_hit=cache_hit,
             repair_count=repair_count,
             cost_class=plan.cost_class.value,
             request_id=request_id,
-            error=error_msg
+            error=error_msg,
+            planned_route=planned_route,
+            executed_route=executed_route,
+            final_provider=final_provider,
+            search_attempted=search_attempted,
+            search_succeeded=search_succeeded,
+            verified_current_information=verified_current_information,
+            fallback_reason=fallback_reason,
         )
+
+    async def aclose(self) -> None:
+        """Cancel in-flight deduplicated search tasks and cleanly shut down resources."""
+        if hasattr(self.deduplicator, "cancel_all"):
+            res = self.deduplicator.cancel_all()
+            if asyncio.iscoroutine(res):
+                await res
+        logger.info("AIEngine shut down cleanly.")

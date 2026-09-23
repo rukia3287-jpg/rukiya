@@ -12,7 +12,7 @@ import time
 from typing import Any, Dict, Optional
 
 from services.ai_engine.engine import AIEngine
-from services.ai_engine.models import AIEngineRequest
+from services.ai_engine.models import AIEngineRequest, RequestPriority
 from services.ai_service import AIService
 from services.config import Config
 from services.decision_service import DecisionService
@@ -114,6 +114,12 @@ class RukiyaOrchestrator:
         generated: Optional[GeneratedResponse] = None
         if self.ai_engine is not None:
             try:
+                req_pri = RequestPriority.HIGH
+                if getattr(decision, "priority", "") == "low":
+                    req_pri = RequestPriority.LOW
+                elif getattr(decision, "priority", "") == "medium":
+                    req_pri = RequestPriority.MEDIUM
+
                 engine_req = AIEngineRequest(
                     text=message.text,
                     author=user.display_name,
@@ -121,6 +127,7 @@ class RukiyaOrchestrator:
                     user_id=message.user_id,
                     canonical_id=user.canonical_id,
                     intent=decision.intent,
+                    priority=req_pri,
                     persistent_memory=persistent_memory if decision.memory_needed else None,
                     stream_memory=session_context if decision.memory_needed else None,
                     recent_messages=recent_messages,
@@ -226,3 +233,10 @@ class RukiyaOrchestrator:
             "global_ai_tokens": self.rate_limiter.get_remaining("global_ai"),
             "model": self.ai_service.model
         }
+
+    async def aclose(self) -> None:
+        """Gracefully shut down AI Engine, AI service, and underlying resources."""
+        if self.ai_engine is not None and hasattr(self.ai_engine, "aclose"):
+            await self.ai_engine.aclose()
+        elif hasattr(self.ai_service, "close"):
+            await self.ai_service.close()

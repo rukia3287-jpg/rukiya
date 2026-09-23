@@ -27,10 +27,30 @@ class Router:
         health: ProviderHealthTracker,
         budget: BudgetManager
     ) -> RouteType:
-        # Check provider availability
+        # Check provider and capability availability independently
         or_avail = health.is_available("openrouter") and budget.can_execute_ai("openrouter", request.user_id)
-        gem_avail = health.is_available("gemini") and budget.can_execute_ai("gemini", request.user_id)
-        search_avail = gem_avail and budget.can_search(request.user_id)
+        
+        # Generation capability
+        gem_gen_avail = (
+            health.is_available("gemini:generation") 
+            if "gemini:generation" in getattr(health, "circuits", {}) 
+            else health.is_available("gemini")
+        ) and budget.can_execute_ai("gemini", request.user_id)
+        
+        # Search capability is independent of generation capability
+        gem_search_avail = (
+            health.is_available("gemini:search")
+            if "gemini:search" in getattr(health, "circuits", {})
+            else health.is_available("gemini")
+        ) and budget.can_search(request.user_id)
+        
+        # Low priority requests drop optional search if resources are constrained
+        if getattr(request, "priority", None) and str(getattr(request.priority, "value", request.priority)).lower() == "low":
+            if budget.daily_searches >= budget.max_daily_searches * 0.8:
+                gem_search_avail = False
+
+        gem_avail = gem_gen_avail
+        search_avail = gem_search_avail
 
         # ─── HARD OVERRIDES ──────────────────────────────────────
         # 1. Total Outage

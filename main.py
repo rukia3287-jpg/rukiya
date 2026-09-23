@@ -108,6 +108,14 @@ class RukiyaBot(commands.Bot):
         logger.info(f"🚀 {self.user} is online!")
         logger.info(f"📊 Connected to {len(self.guilds)} guild(s)")
 
+    async def close(self):
+        try:
+            if hasattr(self, "orchestrator") and hasattr(self.orchestrator, "aclose"):
+                await self.orchestrator.aclose()
+        except Exception as e:
+            logger.warning("Error during orchestrator shutdown: %s", e)
+        await super().close()
+
 
 # ----- Render health server -----
 
