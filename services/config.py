@@ -29,6 +29,22 @@ class Config:
     send_cooldown: float = 1.5
     chat_check_interval: int = 5
 
+    # V2 Architecture settings
+    db_path: str = "rukiya_memory.db"
+    max_memory_per_user: int = 30
+    max_stream_memory: int = 20
+    max_context_messages: int = 8
+    memory_decay_days: float = 30.0
+    response_threshold: float = 0.50
+    anti_repeat_threshold: float = 0.70
+    processed_messages_max: int = 5000
+    rate_limit_global_capacity: int = 10
+    rate_limit_user_capacity: int = 2
+    rate_limit_idle_interval: float = 180.0
+    rate_limit_idle_capacity: int = 1
+    rate_limit_discord_capacity: int = 5
+    idle_chat_enabled: bool = True
+
     # Sets for filtering and triggers
     bot_users: Set[str] = field(default_factory=set)
     banned_words: Set[str] = field(default_factory=set)
@@ -83,14 +99,34 @@ class Config:
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", self.openrouter_model)
         self.openrouter_endpoint = os.getenv("OPENROUTER_ENDPOINT", self.openrouter_endpoint)
         self.bot_name = os.getenv("BOT_NAME", self.bot_name)
+        self.db_path = os.getenv("DB_PATH", self.db_path)
 
         # Parse integer env vars safely
         try:
             self.ai_cooldown = int(os.getenv("AI_COOLDOWN", str(self.ai_cooldown)))
             self.max_message_length = int(os.getenv("MAX_MESSAGE_LENGTH", str(self.max_message_length)))
             self.poll_interval = int(os.getenv("POLL_INTERVAL", str(self.poll_interval)))
+            self.max_memory_per_user = int(os.getenv("MAX_MEMORY_PER_USER", str(self.max_memory_per_user)))
+            self.max_stream_memory = int(os.getenv("MAX_STREAM_MEMORY", str(self.max_stream_memory)))
+            self.max_context_messages = int(os.getenv("MAX_CONTEXT_MESSAGES", str(self.max_context_messages)))
+            self.processed_messages_max = int(os.getenv("PROCESSED_MESSAGES_MAX", str(self.processed_messages_max)))
+            self.rate_limit_global_capacity = int(os.getenv("RATE_LIMIT_GLOBAL_CAPACITY", str(self.rate_limit_global_capacity)))
+            self.rate_limit_user_capacity = int(os.getenv("RATE_LIMIT_USER_CAPACITY", str(self.rate_limit_user_capacity)))
         except ValueError:
             pass
+
+        # Parse float env vars safely
+        try:
+            self.memory_decay_days = float(os.getenv("MEMORY_DECAY_DAYS", str(self.memory_decay_days)))
+            self.response_threshold = float(os.getenv("RESPONSE_THRESHOLD", str(self.response_threshold)))
+            self.anti_repeat_threshold = float(os.getenv("ANTI_REPEAT_THRESHOLD", str(self.anti_repeat_threshold)))
+            self.rate_limit_idle_interval = float(os.getenv("IDLE_CHAT_INTERVAL", str(self.rate_limit_idle_interval)))
+        except ValueError:
+            pass
+
+        idle_enabled_env = os.getenv("IDLE_CHAT_ENABLED")
+        if idle_enabled_env is not None:
+            self.idle_chat_enabled = idle_enabled_env.lower() in ("1", "true", "yes")
 
     def update_from_dict(self, data: dict) -> None:
         for key, value in data.items():
