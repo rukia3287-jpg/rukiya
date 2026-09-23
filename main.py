@@ -49,7 +49,9 @@ class RukiyaBot(commands.Bot):
         # Load centralized configuration
         self.config = Config(
             discord_token=os.getenv("DISCORD_TOKEN"),
-            openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
+            gemini_api_key=os.getenv("GEMINI_API_KEY"),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
         )
 
         # Initialize V2 foundational services

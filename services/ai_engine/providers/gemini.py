@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 class ClientManager:
     """Manages SDK import, client initialization, credentials, and health."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash-lite"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-3.5-flash-lite"):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+        raw_model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        # Google GenAI accepts both "gemini-3.5-flash-lite" and "models/gemini-3.5-flash-lite"
+        self.model = raw_model.removeprefix("models/") if raw_model.startswith("models/") else raw_model
         self._client: Optional[Any] = None
         self._sdk_available: Optional[bool] = None
 
@@ -436,7 +438,7 @@ class GeminiProvider(AIProvider):
     ):
         self.config = config or Config()
         api_key = getattr(self.config, "gemini_api_key", None) or os.getenv("GEMINI_API_KEY")
-        model = getattr(self.config, "gemini_model", "gemini-2.5-flash-lite")
+        model = getattr(self.config, "gemini_model", None) or os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
         self.timeout = float(getattr(self.config, "gemini_timeout", 20.0))
         self.search_timeout = float(getattr(self.config, "search_timeout", 15.0))
 

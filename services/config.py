@@ -5,6 +5,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Set, Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 @dataclass
 class Config:
@@ -18,7 +24,7 @@ class Config:
 
     # Gemini & AI Engine settings
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash-lite"
     gemini_search_enabled: bool = True
     gemini_search_daily_limit: int = 450
     gemini_search_cache_ttl: int = 300
