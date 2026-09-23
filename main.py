@@ -17,6 +17,7 @@ from services.safety_service import SafetyService
 from services.decision_service import DecisionService
 from services.rate_limiter import RateLimiter
 from services.orchestrator import RukiyaOrchestrator
+from services.ai_engine import AIEngine
 
 # Logging
 logging.basicConfig(
@@ -59,6 +60,7 @@ class RukiyaBot(commands.Bot):
         self.rate_limiter = RateLimiter(self.config)
         self.youtube_service = YouTubeService(self.config)
         self.ai_service = AIService(self.config)
+        self.ai_engine = AIEngine(self.config)
 
         # Central Orchestrator coordinating the pipeline
         self.orchestrator = RukiyaOrchestrator(
@@ -68,7 +70,8 @@ class RukiyaBot(commands.Bot):
             decision_service=self.decision_service,
             safety_service=self.safety_service,
             rate_limiter=self.rate_limiter,
-            ai_service=self.ai_service
+            ai_service=self.ai_service,
+            ai_engine=self.ai_engine
         )
 
         # Chat Monitor wired to orchestrator

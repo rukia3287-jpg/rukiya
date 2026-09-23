@@ -16,6 +16,24 @@ class Config:
     openrouter_model: str = "deepseek/deepseek-r1"
     openrouter_endpoint: str = "https://openrouter.ai/api/v1/chat/completions"
 
+    # Gemini & AI Engine settings
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = "gemini-2.5-flash-lite"
+    gemini_search_enabled: bool = True
+    gemini_search_daily_limit: int = 450
+    gemini_search_cache_ttl: int = 300
+
+    ai_max_repair_attempts: int = 2
+    ai_max_planner_steps: int = 4
+    max_ai_concurrency: int = 3
+    max_search_concurrency: int = 2
+
+    openrouter_timeout: float = 20.0
+    gemini_timeout: float = 20.0
+    search_timeout: float = 15.0
+    critic_timeout: float = 15.0
+    repair_timeout: float = 15.0
+
     # YouTube settings
     client_secrets_file: str = "client_secret.json"
     token_file: str = "token.json"
@@ -92,12 +110,21 @@ class Config:
         if not self.openrouter_api_key:
             self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
 
+        if not self.gemini_api_key:
+            self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+
         if not self.video_id:
             self.video_id = os.getenv("YOUTUBE_VIDEO_ID", "")
 
         # Override with environment variables
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", self.openrouter_model)
         self.openrouter_endpoint = os.getenv("OPENROUTER_ENDPOINT", self.openrouter_endpoint)
+        self.gemini_model = os.getenv("GEMINI_MODEL", self.gemini_model)
+
+        gemini_search_env = os.getenv("GEMINI_SEARCH_ENABLED")
+        if gemini_search_env is not None:
+            self.gemini_search_enabled = gemini_search_env.lower() in ("1", "true", "yes")
+
         self.bot_name = os.getenv("BOT_NAME", self.bot_name)
         self.db_path = os.getenv("DB_PATH", self.db_path)
 
@@ -112,6 +139,12 @@ class Config:
             self.processed_messages_max = int(os.getenv("PROCESSED_MESSAGES_MAX", str(self.processed_messages_max)))
             self.rate_limit_global_capacity = int(os.getenv("RATE_LIMIT_GLOBAL_CAPACITY", str(self.rate_limit_global_capacity)))
             self.rate_limit_user_capacity = int(os.getenv("RATE_LIMIT_USER_CAPACITY", str(self.rate_limit_user_capacity)))
+            self.gemini_search_daily_limit = int(os.getenv("GEMINI_SEARCH_DAILY_LIMIT", str(self.gemini_search_daily_limit)))
+            self.gemini_search_cache_ttl = int(os.getenv("GEMINI_SEARCH_CACHE_TTL", str(self.gemini_search_cache_ttl)))
+            self.ai_max_repair_attempts = int(os.getenv("AI_MAX_REPAIR_ATTEMPTS", str(self.ai_max_repair_attempts)))
+            self.ai_max_planner_steps = int(os.getenv("AI_MAX_PLANNER_STEPS", str(self.ai_max_planner_steps)))
+            self.max_ai_concurrency = int(os.getenv("MAX_AI_CONCURRENCY", str(self.max_ai_concurrency)))
+            self.max_search_concurrency = int(os.getenv("MAX_SEARCH_CONCURRENCY", str(self.max_search_concurrency)))
         except ValueError:
             pass
 
@@ -121,6 +154,11 @@ class Config:
             self.response_threshold = float(os.getenv("RESPONSE_THRESHOLD", str(self.response_threshold)))
             self.anti_repeat_threshold = float(os.getenv("ANTI_REPEAT_THRESHOLD", str(self.anti_repeat_threshold)))
             self.rate_limit_idle_interval = float(os.getenv("IDLE_CHAT_INTERVAL", str(self.rate_limit_idle_interval)))
+            self.openrouter_timeout = float(os.getenv("OPENROUTER_TIMEOUT", str(self.openrouter_timeout)))
+            self.gemini_timeout = float(os.getenv("GEMINI_TIMEOUT", str(self.gemini_timeout)))
+            self.search_timeout = float(os.getenv("SEARCH_TIMEOUT", str(self.search_timeout)))
+            self.critic_timeout = float(os.getenv("CRITIC_TIMEOUT", str(self.critic_timeout)))
+            self.repair_timeout = float(os.getenv("REPAIR_TIMEOUT", str(self.repair_timeout)))
         except ValueError:
             pass
 

@@ -11,6 +11,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from services.ai_engine.engine import AIEngine
+from services.ai_engine.models import AIEngineRequest
 from services.ai_service import AIService
 from services.config import Config
 from services.decision_service import DecisionService
@@ -35,6 +37,7 @@ class RukiyaOrchestrator:
         safety_service: Optional[SafetyService] = None,
         rate_limiter: Optional[RateLimiter] = None,
         ai_service: Optional[AIService] = None,
+        ai_engine: Optional[AIEngine] = None,
     ):
         self.config = config or Config()
         self.memory_service = memory_service or MemoryService(self.config)
@@ -43,6 +46,7 @@ class RukiyaOrchestrator:
         self.decision_service = decision_service or DecisionService(self.config)
         self.rate_limiter = rate_limiter or RateLimiter(self.config)
         self.ai_service = ai_service or AIService(self.config)
+        self.ai_engine = ai_engine
 
     async def process_message(
         self,
@@ -106,22 +110,45 @@ class RukiyaOrchestrator:
                 logger.warning("event=rate_limited scope=user_ai user=%s wait=%.1fs", user.canonical_id, user_res.wait_time)
                 return None
 
-        # 6. Build Compact Context for AI Generation
-        prompt_messages = self.ai_service.build_context_messages(
-            user_message=message.text,
-            author=user.display_name,
-            persistent_memory=persistent_memory if decision.memory_needed else None,
-            stream_memory=session_context if decision.memory_needed else None,
-            recent_messages=recent_messages,
-            decision=decision
-        )
-
-        # 7. AI Generation
+        # 6 & 7. AI Generation (AI Engine or AIService)
         generated: Optional[GeneratedResponse] = None
-        try:
-            generated = await self.ai_service.generate(prompt_messages, author=user.display_name)
-        except Exception as e:
-            logger.exception("AI generation exception: %s", e)
+        if self.ai_engine is not None:
+            try:
+                engine_req = AIEngineRequest(
+                    text=message.text,
+                    author=user.display_name,
+                    platform=message.platform,
+                    user_id=message.user_id,
+                    canonical_id=user.canonical_id,
+                    intent=decision.intent,
+                    persistent_memory=persistent_memory if decision.memory_needed else None,
+                    stream_memory=session_context if decision.memory_needed else None,
+                    recent_messages=recent_messages,
+                )
+                engine_res = await self.ai_engine.process(engine_req)
+                generated = GeneratedResponse(
+                    text=engine_res.text,
+                    confidence=engine_res.confidence,
+                    used_memory=bool((persistent_memory and decision.memory_needed) or (session_context and decision.memory_needed)),
+                    latency_ms=engine_res.latency_ms,
+                    model=engine_res.provider,
+                    is_fallback=engine_res.fallback_used
+                )
+            except Exception as e:
+                logger.exception("AI Engine generation exception: %s", e)
+        else:
+            prompt_messages = self.ai_service.build_context_messages(
+                user_message=message.text,
+                author=user.display_name,
+                persistent_memory=persistent_memory if decision.memory_needed else None,
+                stream_memory=session_context if decision.memory_needed else None,
+                recent_messages=recent_messages,
+                decision=decision
+            )
+            try:
+                generated = await self.ai_service.generate(prompt_messages, author=user.display_name)
+            except Exception as e:
+                logger.exception("AI generation exception: %s", e)
 
         # If AI failed or returned None, use safe intent-based fallback
         if not generated or not generated.text.strip():

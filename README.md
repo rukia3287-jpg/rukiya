@@ -106,7 +106,27 @@ Configure these variables in your `.env` file or hosting environment (e.g. Rende
 | `PROCESSED_MESSAGES_MAX`| Max deduplicated messages kept in memory | `5000` | No |
 | `IDLE_CHAT_ENABLED` | Enable automated idle livestream messages | `true` | No |
 | `IDLE_CHAT_INTERVAL` | Seconds between idle livestream messages | `180` | No |
+| `GEMINI_API_KEY` | Google Gemini API Key | - | For Search/Gemini |
+| `GEMINI_MODEL` | Gemini Model with Search Grounding | `gemini-2.5-flash-lite` | No |
+| `GEMINI_SEARCH_ENABLED` | Enable Google Search Grounding | `true` | No |
+| `GEMINI_SEARCH_DAILY_LIMIT`| Daily Search Grounding Safety Allowance | `450` | No |
+| `GEMINI_SEARCH_CACHE_TTL`| Search Grounding Cache TTL (seconds) | `300` | No |
+| `AI_MAX_REPAIR_ATTEMPTS` | Max Self-Critic Repair Iterations | `2` | No |
+| `AI_MAX_PLANNER_STEPS` | Max Steps for Query Planning | `4` | No |
+| `MAX_AI_CONCURRENCY` | Max Concurrent LLM Provider Requests | `3` | No |
+| `MAX_SEARCH_CONCURRENCY` | Max Concurrent Search Provider Requests | `2` | No |
 
+---
+
+### 🧠 Rukiya Advanced AI Engine (OpenRouter + Gemini + Google Search)
+
+Rukiya integrates a specialized multi-provider control layer:
+- **OpenRouter**: Primary provider for conversation, personality responses, memory-driven chat, and final Rukiya-style persona rendering.
+- **Gemini (`gemini-2.5-flash-lite`)**: Grounded generation and Google Search integration via the official `google-genai` SDK and `google_search` grounding tool.
+- **Hybrid Pipeline**: For queries requiring current information, Gemini retrieves verified web search grounding and scores sources $\to$ Evidence Engine ranks and validates evidence $\to$ OpenRouter renders the concise single-sentence Rukiya personality response.
+- **Self-Critic & Bounded Repair**: Analyzes candidate responses for length, tone, factual consistency, repetition, and safety with a strict maximum of 2 repair attempts before safe fallback.
+- **In-flight Deduplication & Search Caching**: Identical concurrent queries join an active in-flight task to eliminate redundant API calls.
+- **Circuit Breakers & Daily Budgeting**: Automatically trips to `OPEN` state upon repeated provider errors and enforces a default safety limit of 450 daily searches to remain safely below the free search-grounding allowance.
 ---
 
 ## 💻 Local Development & Installation
