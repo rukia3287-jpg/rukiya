@@ -11,6 +11,12 @@ from services.config import Config
 from services.youtube_service import YouTubeService
 from services.ai_service import AIService
 from services.chat_monitor import ChatMonitor
+from services.memory_service import MemoryService
+from services.identity_service import IdentityService
+from services.safety_service import SafetyService
+from services.decision_service import DecisionService
+from services.rate_limiter import RateLimiter
+from services.orchestrator import RukiyaOrchestrator
 
 # Logging
 logging.basicConfig(
@@ -25,8 +31,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+
 class RukiyaBot(commands.Bot):
-    """Main bot class with all services attached"""
+    """Main bot class with all V2 services attached"""
 
     def __init__(self):
         intents = discord.Intents.default()
@@ -38,18 +45,41 @@ class RukiyaBot(commands.Bot):
             help_command=None
         )
 
-        # Load config (NOW using OpenRouter)
+        # Load centralized configuration
         self.config = Config(
             discord_token=os.getenv("DISCORD_TOKEN"),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
         )
 
-        # Attach services BEFORE cogs load
+        # Initialize V2 foundational services
+        self.memory_service = MemoryService(self.config)
+        self.identity_service = IdentityService(self.memory_service)
+        self.safety_service = SafetyService(self.config)
+        self.decision_service = DecisionService(self.config)
+        self.rate_limiter = RateLimiter(self.config)
         self.youtube_service = YouTubeService(self.config)
         self.ai_service = AIService(self.config)
-        self.chat_monitor = ChatMonitor(self.youtube_service, self.ai_service, self.config)
 
-        logger.info("RukiyaBot services initialized")
+        # Central Orchestrator coordinating the pipeline
+        self.orchestrator = RukiyaOrchestrator(
+            config=self.config,
+            identity_service=self.identity_service,
+            memory_service=self.memory_service,
+            decision_service=self.decision_service,
+            safety_service=self.safety_service,
+            rate_limiter=self.rate_limiter,
+            ai_service=self.ai_service
+        )
+
+        # Chat Monitor wired to orchestrator
+        self.chat_monitor = ChatMonitor(
+            self.youtube_service,
+            self.ai_service,
+            self.config,
+            orchestrator=self.orchestrator
+        )
+
+        logger.info("RukiyaBot V2 services and orchestrator initialized successfully")
 
     async def setup_hook(self):
         """Load cogs and sync slash commands"""
@@ -79,6 +109,7 @@ class RukiyaBot(commands.Bot):
 async def health_check(request):
     return web.Response(text="Bot is running!", status=200)
 
+
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', health_check)
@@ -90,6 +121,7 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     logger.info(f"🌐 Health check server on port {port}")
+
 
 # ----- Main entrypoint -----
 

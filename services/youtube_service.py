@@ -6,10 +6,16 @@ import tempfile
 from typing import Optional, Dict, Any
 import asyncio
 
-from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from googleapiclient.errors import HttpError
+try:
+    from googleapiclient.discovery import build
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.errors import HttpError
+except ImportError:
+    build = None
+    Request = None
+    Credentials = None
+    HttpError = type("HttpError", (Exception,), {})
 
 # Import Config from the centralized location
 from services.config import Config
@@ -92,6 +98,10 @@ class YouTubeService:
     def authenticate(self) -> bool:
         """Authenticate with YouTube API (blocking). Call via thread from async code if needed."""
         try:
+            if build is None or Credentials is None:
+                logger.error("❌ Google API client library not installed")
+                return False
+
             if not os.path.exists(self.config.client_secrets_file):
                 logger.error("❌ Client secrets file not found")
                 return False

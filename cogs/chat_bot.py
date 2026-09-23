@@ -125,9 +125,20 @@ class RukiyaCog(commands.Cog):
 
         try:
             async with message.channel.typing():
+                from services.orchestrator import RukiyaOrchestrator
+                orch = getattr(self.bot, "orchestrator", None)
                 ai = getattr(self.bot, "ai_service", None)
                 reply = None
-                if ai:
+                if isinstance(orch, RukiyaOrchestrator):
+                    reply = await orch.process_raw_text(
+                        cleaned_text,
+                        author=message.author.display_name,
+                        platform="discord",
+                        user_id=str(message.author.id),
+                        bypass_trigger=True,
+                        bypass_cooldown=True
+                    )
+                elif ai and hasattr(ai, "generate_response"):
                     reply = await ai.generate_response(
                         cleaned_text,
                         message.author.display_name,
@@ -155,9 +166,23 @@ class RukiyaCog(commands.Cog):
         if now - self._last_sent_at < self.cooldown_seconds:
             return
 
-        # Use the shared AIService on the bot (handles trigger filtering)
+        from services.orchestrator import RukiyaOrchestrator
+        orch = getattr(self.bot, "orchestrator", None)
         ai = getattr(self.bot, "ai_service", None)
-        if ai:
+        reply = None
+        if isinstance(orch, RukiyaOrchestrator):
+            from services.models import ChatMessage
+            chat_msg = ChatMessage(
+                platform="youtube",
+                message_id=f"yt_{int(time.time()*1000)}",
+                user_id=author,
+                username=author,
+                display_name=author,
+                text=message
+            )
+            res = await orch.process_message(chat_msg)
+            reply = res.text if res else None
+        elif ai and hasattr(ai, "generate_response"):
             try:
                 reply = await ai.generate_response(message, author)
             except Exception as e:
@@ -355,9 +380,20 @@ class RukiyaCog(commands.Cog):
         except Exception:
             pass
 
+        from services.orchestrator import RukiyaOrchestrator
+        orch = getattr(self.bot, "orchestrator", None)
         ai = getattr(self.bot, "ai_service", None)
         reply = None
-        if ai:
+        if isinstance(orch, RukiyaOrchestrator):
+            reply = await orch.process_raw_text(
+                question,
+                author=interaction.user.display_name,
+                platform="discord",
+                user_id=str(interaction.user.id),
+                bypass_trigger=True,
+                bypass_cooldown=True
+            )
+        elif ai and hasattr(ai, "generate_response"):
             reply = await ai.generate_response(
                 question,
                 interaction.user.display_name,
