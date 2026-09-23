@@ -1,7 +1,8 @@
-"""YouTube live-chat monitor with quota-aware polling and shutdown control."""
+"""YouTube live-chat monitor with quota-aware polling, bounded LRU deduplication, and session lifecycle."""
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import logging
 import random
 import time
@@ -14,22 +15,28 @@ SubscriberType = Callable[[str, str], Awaitable[Any]]
 
 
 class ChatMonitor:
-    """Own exactly one background polling task at a time."""
+    """Owns exactly one background polling task at a time for YouTube live chat."""
 
-    # A malformed/tiny server hint is more harmful than useful.  Valid server
+    # A malformed/tiny server hint is more harmful than useful. Valid server
     # intervals (including 8 seconds) are honored exactly; tiny values back off.
     MIN_SAFE_SERVER_POLL_SECONDS = 5.0
     TINY_HINT_BACKOFF_SECONDS = 10.0
 
-    def __init__(self, youtube_service, ai_service, config: ConfigType = None):
+    def __init__(self, youtube_service, ai_service, config: ConfigType = None, orchestrator: Optional[Any] = None):
         self.youtube = youtube_service
         self.ai = ai_service
         self.config = config
+        self.orchestrator = orchestrator
         self.is_running = False
         self.live_chat_id: Optional[str] = None
         self.next_page_token: Optional[str] = None
         self.video_id: Optional[str] = None
-        self.processed_messages: set[str] = set()
+        self.stream_session_id: Optional[str] = None
+
+        # Bounded LRU cache for processed messages to prevent memory leaks (max 5000)
+        self.processed_messages_max = int(self._cfg("processed_messages_max", 5000))
+        self.processed_messages: OrderedDict[str, float] = OrderedDict()
+
         self.subscribers: list[SubscriberType] = []
         self._monitor_task: Optional[asyncio.Task] = None
         self._stopping = False
@@ -37,9 +44,15 @@ class ChatMonitor:
         self._next_poll_delay = self._poll_interval
         self._send_cooldown = float(self._cfg("send_cooldown", 2.0))
         self._idle_chat_enabled = bool(self._cfg("idle_chat_enabled", True))
-        self._idle_chat_interval = float(self._cfg("idle_chat_interval", 180))
+        self._idle_chat_interval = float(self._cfg("rate_limit_idle_interval", self._cfg("idle_chat_interval", 180.0)))
         messages = self._cfg("idle_chat_messages", ()) or ()
         self._idle_chat_messages = [m.strip() for m in messages if isinstance(m, str) and m.strip()]
+        if not self._idle_chat_messages:
+            self._idle_chat_messages = [
+                "Enjoying the stream? Drop a comment in chat!",
+                "Feel free to ask questions or chat with Rukiya!",
+                "Stream is in full swing—what's everyone up to today?"
+            ]
         self._last_activity_at = time.monotonic()
         self._last_idle_message_at = 0.0
 
@@ -74,7 +87,15 @@ class ChatMonitor:
         self.processed_messages.clear()
         self._next_poll_delay = self._poll_interval
         self._last_activity_at, self._last_idle_message_at = time.monotonic(), 0.0
-        logger.info("Started monitoring chat: %s", live_chat_id)
+
+        # Stream session initialization
+        vid = video_id or "unknown"
+        self.stream_session_id = f"stream_{vid}_{int(time.time())}"
+        mem_svc = getattr(self.orchestrator, "memory_service", None)
+        if mem_svc:
+            mem_svc.start_stream_session(vid, session_id=self.stream_session_id)
+
+        logger.info("Started monitoring chat: %s (session %s)", live_chat_id, self.stream_session_id)
         if not start_background:
             return True
         try:
@@ -91,19 +112,31 @@ class ChatMonitor:
         task = self._monitor_task
         self.is_running = False
         self._stopping = bool(task and not task.done())
+
+        # End stream session in memory service
+        mem_svc = getattr(self.orchestrator, "memory_service", None)
+        if mem_svc and self.stream_session_id:
+            mem_svc.end_stream_session(self.stream_session_id)
+
         if task and not task.done():
             task.cancel()
             logger.info("Monitor task cancellation requested")
         else:
             self._stopping = False
-        self.live_chat_id = self.video_id = self.next_page_token = None
+        self.live_chat_id = self.video_id = self.next_page_token = self.stream_session_id = None
         self.processed_messages.clear()
 
     def get_status(self) -> dict[str, Any]:
-        return {"is_running": self.is_running, "is_stopping": self._stopping, "live_chat_id": self.live_chat_id,
-                "video_id": self.video_id, "processed_count": len(self.processed_messages),
-                "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
-                "subscribers_count": len(self.subscribers)}
+        return {
+            "is_running": self.is_running,
+            "is_stopping": self._stopping,
+            "live_chat_id": self.live_chat_id,
+            "video_id": self.video_id,
+            "session_id": self.stream_session_id,
+            "processed_count": len(self.processed_messages),
+            "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
+            "subscribers_count": len(self.subscribers)
+        }
 
     @staticmethod
     def _is_quota_exhausted(exc: Exception) -> bool:
@@ -159,10 +192,16 @@ class ChatMonitor:
             self.next_page_token = response.get("nextPageToken")
             for item in response.get("items", []):
                 snippet, message_id = item.get("snippet", {}), item.get("id")
-                message, author = snippet.get("displayMessage", ""), snippet.get("authorDisplayName", "Unknown")
+                message = snippet.get("displayMessage", "")
+                author = snippet.get("authorDisplayName", "Unknown")
                 if not message or not message_id or message_id in self.processed_messages:
                     continue
-                self.processed_messages.add(message_id)
+
+                # Add to bounded LRU cache
+                self.processed_messages[message_id] = time.monotonic()
+                if len(self.processed_messages) > self.processed_messages_max:
+                    self.processed_messages.popitem(last=False)
+
                 self._last_activity_at = time.monotonic()
                 await self._notify_subscribers(message, author)
             await self._maybe_send_idle_message()
@@ -185,9 +224,18 @@ class ChatMonitor:
         now = time.monotonic()
         if now - self._last_activity_at < self._idle_chat_interval or (self._last_idle_message_at and now - self._last_idle_message_at < self._idle_chat_interval):
             return
-        if await self.send_chat_message(random.choice(self._idle_chat_messages), message_kind="idle"):
+
+        # Check rate limiter for idle chat budget if limiter exists
+        rate_limiter = getattr(self.orchestrator, "rate_limiter", None)
+        if rate_limiter:
+            lim_res = rate_limiter.allow("idle_chat")
+            if not lim_res.allowed:
+                return
+
+        idle_msg = random.choice(self._idle_chat_messages)
+        if await self.send_chat_message(idle_msg, message_kind="idle"):
             self._last_idle_message_at = time.monotonic()
-            logger.info("Idle chat message sent")
+            logger.info("Idle chat message sent: '%s'", idle_msg)
 
     async def _monitor_loop(self) -> None:
         retries = 0

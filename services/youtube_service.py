@@ -14,7 +14,6 @@ from googleapiclient.errors import HttpError
 # Import Config from the centralized location
 from services.config import Config
 
-# configure basic logging only if not configured elsewhere
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(
@@ -24,7 +23,7 @@ if not logger.handlers:
 
 
 class YouTubeService:
-    """Handles YouTube API operations
+    """Handles YouTube API operations.
 
     Important: Do NOT import AIService at module import time here — pass an AI service
     instance into any higher-level runner that needs both services. This avoids circular imports.
@@ -199,97 +198,3 @@ class YouTubeService:
             logger.error(f"❌ Failed to send message: {e}")
             logger.error(f"Message was: {message}")
             return False
-
-
-class ChatBot:
-    """Async-friendly ChatBot wrapper to run the polling loop without blocking."""
-
-    def __init__(self, youtube_service: YouTubeService, ai_service, config: Config):
-        # Note: ai_service type is left generic to avoid import-time dependency
-        self.youtube = youtube_service
-        self.ai = ai_service
-        self.config = config
-        self.processed_messages: set = set()
-        self.live_chat_id: Optional[str] = None
-        self.next_page_token: Optional[str] = None
-        self.running = False
-        self._task: Optional[asyncio.Task] = None
-
-    async def _process_once(self) -> None:
-        """One iteration of processing (non-blocking)."""
-        if not self.running:
-            return
-
-        try:
-            response = await asyncio.to_thread(
-                self.youtube.get_chat_messages,
-                self.live_chat_id,
-                self.next_page_token
-            )
-
-            if not response:
-                return
-
-            self.next_page_token = response.get("nextPageToken")
-            messages = response.get("items", [])
-
-            for message in messages:
-                try:
-                    snippet = message.get("snippet", {})
-                    author_details = message.get("authorDetails", {})
-                    message_text = snippet.get("displayMessage", "")
-                    author_name = author_details.get("displayName", "Unknown")
-                    message_id = message.get("id", "")
-
-                    if not message_text or message_id in self.processed_messages:
-                        continue
-
-                    self.processed_messages.add(message_id)
-
-                    logger.info(f"📨 Message from {author_name}: {message_text}")
-
-                    # AI response (await the async AI)
-                    ai_response = await self.ai.generate_response(message_text, author_name)
-                    if ai_response:
-                        # send message in thread
-                        success = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, ai_response)
-                        if not success:
-                            logger.error("❌ Failed to send AI response")
-
-                except Exception as e:
-                    logger.error(f"Error processing a message: {e}")
-
-        except Exception as e:
-            logger.error(f"Error during _process_once: {e}")
-
-    async def run_async(self, video_id: str):
-        """Start the async run loop. Call this with asyncio.create_task or await it."""
-        try:
-            self.live_chat_id = await asyncio.to_thread(self.youtube.get_live_chat_id, video_id)
-            if not self.live_chat_id:
-                logger.error("❌ Could not get live chat ID. Is the stream live?")
-                return False
-
-            self.running = True
-            logger.info(f"✅ Monitoring chat: {self.live_chat_id}")
-
-            while self.running:
-                await self._process_once()
-                await asyncio.sleep(self.config.poll_interval)
-
-            logger.info("✅ Chat bot stopped")
-            return True
-
-        except asyncio.CancelledError:
-            logger.info("Run loop cancelled")
-            self.running = False
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error in run_async: {e}")
-            self.running = False
-            return False
-
-    def stop(self):
-        """Stop the async loop at next tick."""
-        self.running = False
-        logger.info("🛑 Stopping chat bot...")
