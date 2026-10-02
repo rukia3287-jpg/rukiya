@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import asyncio
 import logging
 from typing import Optional
@@ -166,48 +167,49 @@ class RukiyaCog(commands.Cog):
         if now - self._last_sent_at < self.cooldown_seconds:
             return
 
-        from services.orchestrator import RukiyaOrchestrator
-        orch = getattr(self.bot, "orchestrator", None)
-        ai = getattr(self.bot, "ai_service", None)
-        reply = None
-        if isinstance(orch, RukiyaOrchestrator):
-            from services.models import ChatMessage
-            chat_msg = ChatMessage(
-                platform="youtube",
-                message_id=f"yt_{int(time.time()*1000)}",
-                user_id=author,
-                username=author,
-                display_name=author,
-                text=message
-            )
-            res = await orch.process_message(chat_msg)
-            reply = res.text if res else None
-        elif ai and hasattr(ai, "generate_response"):
-            try:
+        try:
+            from services.orchestrator import RukiyaOrchestrator
+            orch = getattr(self.bot, "orchestrator", None)
+            ai = getattr(self.bot, "ai_service", None)
+            reply = None
+
+            if isinstance(orch, RukiyaOrchestrator):
+                from services.models import ChatMessage
+                chat_msg = ChatMessage(
+                    platform="youtube",
+                    message_id=f"yt_{int(time.time() * 1000)}",
+                    user_id=author,
+                    username=author,
+                    display_name=author,
+                    text=message
+                )
+                res = await orch.process_message(chat_msg)
+                reply = res.text if res else None
+            elif ai and hasattr(ai, "generate_response"):
                 reply = await ai.generate_response(message, author)
-            except Exception as e:
-                logger.exception(f"ai_service.generate_response failed: {e}")
-                return
-        else:
-            # Fallback: directly call OpenRouter if ai_service not present
-            try:
+            else:
                 reply = await self.generate_reply(message, author)
-            except Exception as e:
-                logger.exception(f"generate_reply fallback failed: {e}")
+
+            if not reply:
+                logger.debug("No YouTube reply generated for %s: %s", author, message[:120])
                 return
 
-        if not reply:
-            return
+            cm = getattr(self.bot, "chat_monitor", None)
+            if not cm:
+                logger.error("bot.chat_monitor missing — cannot send reply")
+                return
 
-        cm = getattr(self.bot, "chat_monitor", None)
-        if not cm:
-            logger.error("bot.chat_monitor missing — cannot send reply")
-            return
+            sent = await cm.send_chat_message(reply)
+            if sent:
+                self._last_sent_at = asyncio.get_event_loop().time()
+                logger.info("Rukiya replied to %s: %s", author, reply)
 
-        sent = await cm.send_chat_message(reply)
-        if sent:
-            self._last_sent_at = now
-            logger.info(f"Rukiya replied to {author}: {reply}")
+        except Exception:
+            logger.exception(
+                "YouTube auto-reply failed for author=%s message=%r",
+                author,
+                message[:120],
+            )
 
     # ────────────────────────────────────────────
     # OpenRouter call (used by direct commands)
@@ -375,6 +377,16 @@ class RukiyaCog(commands.Cog):
     )
     async def slash_ask(self, interaction: discord.Interaction, question: str, post_to_yt: bool = False):
         """Ask Rukiya a question directly via slash command."""
+        if post_to_yt and (
+            not interaction.guild
+            or not interaction.user.guild_permissions.administrator
+        ):
+            await interaction.response.send_message(
+                "❌ Only server administrators can post an AI reply to YouTube chat.",
+                ephemeral=True,
+            )
+            return
+
         try:
             await interaction.response.defer(thinking=True)
         except Exception:
@@ -427,6 +439,7 @@ class RukiyaCog(commands.Cog):
 
     @app_commands.command(name="say", description="Send a message to YouTube live chat as Rukiya")
     @app_commands.describe(text="Message text to post in YouTube live chat")
+    @app_commands.checks.has_permissions(administrator=True)
     async def slash_say(self, interaction: discord.Interaction, text: str):
         """Send a message directly to YouTube live chat."""
         try:
@@ -452,6 +465,7 @@ class RukiyaCog(commands.Cog):
         app_commands.Choice(name="Enable (Auto-respond to triggers)", value="enable"),
         app_commands.Choice(name="Disable (Stop auto-responding)", value="disable"),
     ])
+    @app_commands.checks.has_permissions(administrator=True)
     async def slash_auto_reply(self, interaction: discord.Interaction, action: str = "status"):
         """Manage auto-reply setting for YouTube live chat."""
         try:
