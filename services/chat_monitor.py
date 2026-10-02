@@ -74,7 +74,12 @@ class ChatMonitor:
             try:
                 await callback(message, author)
             except Exception:
-                logger.exception("Subscriber failed: %r", callback)
+                logger.exception(
+                    "Subscriber failed: %r for author=%s message=%r",
+                    callback,
+                    author,
+                    message[:120],
+                )
 
     def start_monitoring(self, live_chat_id: str, video_id: Optional[str] = None, *, start_background: bool = True) -> bool:
         """Start monitoring, or reject while the prior task is still winding down."""
@@ -160,8 +165,19 @@ class ChatMonitor:
         self._next_poll_delay = seconds if seconds >= self.MIN_SAFE_SERVER_POLL_SECONDS else self.TINY_HINT_BACKOFF_SECONDS
 
     async def send_chat_message(self, text: str, *, message_kind: str = "reply") -> bool:
-        if not text or not self.live_chat_id:
+        if not text or not self.live_chat_id or not self.is_running:
             return False
+
+        rate_limiter = getattr(self.orchestrator, "rate_limiter", None)
+        if rate_limiter and message_kind == "reply":
+            limit_result = rate_limiter.allow("youtube_send")
+            if not limit_result.allowed:
+                logger.warning(
+                    "YouTube send rate-limited; wait %.1fs",
+                    limit_result.wait_time,
+                )
+                return False
+
         try:
             sent = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, text, message_kind=message_kind)
             if sent:
@@ -192,8 +208,9 @@ class ChatMonitor:
             self.next_page_token = response.get("nextPageToken")
             for item in response.get("items", []):
                 snippet, message_id = item.get("snippet", {}), item.get("id")
-                message = snippet.get("displayMessage", "")
-                author = snippet.get("authorDisplayName", "Unknown")
+                author_details = item.get("authorDetails", {}) or {}
+                message = snippet.get("displayMessage", "") or snippet.get("textMessageDetails", {}).get("messageText", "")
+                author = author_details.get("displayName", "Unknown")
                 if not message or not message_id or message_id in self.processed_messages:
                     continue
 
