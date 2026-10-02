@@ -42,6 +42,7 @@ class AdminCommands(commands.Cog):
     @app_commands.command(name="test_ai", description="Test Rukiya's AI response directly (bypasses trigger rules)")
     @app_commands.describe(message="Message to test AI generation with")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def test_ai(self, interaction: discord.Interaction, message: str):
         """Directly calls AI service or orchestrator with Rukiya persona."""
         try:
@@ -127,6 +128,7 @@ class AdminCommands(commands.Cog):
     @app_commands.command(name="test_trigger", description="Check if a message would trigger Rukiya")
     @app_commands.describe(message="Message to check against trigger and decision rules")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def test_trigger(self, interaction: discord.Interaction, message: str):
         """Dry-run DecisionService to inspect eligibility and priority breakdown."""
         try:
@@ -209,6 +211,7 @@ class AdminCommands(commands.Cog):
     # ────────────────────────────────────────────
     @app_commands.command(name="bot_status", description="Get full bot and V2 service status")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def status(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -256,6 +259,7 @@ class AdminCommands(commands.Cog):
     @app_commands.command(name="memory_lookup", description="Lookup memory stored for a user")
     @app_commands.describe(user_id="Platform canonical ID or Discord user mention")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def memory_lookup(self, interaction: discord.Interaction, user_id: str):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -293,6 +297,7 @@ class AdminCommands(commands.Cog):
     @app_commands.command(name="memory_reset", description="Reset persistent memory for a user")
     @app_commands.describe(user_id="Platform canonical ID or Discord user mention")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def memory_reset(self, interaction: discord.Interaction, user_id: str):
         try:
             await interaction.response.defer(ephemeral=True)
@@ -315,6 +320,7 @@ class AdminCommands(commands.Cog):
     # ────────────────────────────────────────────
     @app_commands.command(name="rate_limit_status", description="Check rate limiter token budgets")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def rate_limit_status(self, interaction: discord.Interaction):
         try:
             await interaction.response.defer(ephemeral=True)
