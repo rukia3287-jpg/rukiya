@@ -47,6 +47,7 @@ class Config:
 
     # Bot behavior settings
     bot_name: str = "Rukiya"
+    ai_temperature: float = 0.85
     max_message_length: int = 250
     ai_cooldown: int = 5          # ⬇ lowered from 20 → 5s for live chat responsiveness
     poll_interval: int = 10       # ⬆ set to 10s default to conserve YouTube API quota
@@ -132,6 +133,13 @@ class Config:
             self.gemini_search_enabled = gemini_search_env.lower() in ("1", "true", "yes")
 
         self.bot_name = os.getenv("BOT_NAME", self.bot_name)
+        # Shared generation temperature. RUKIYA_TEMP is the character-chat override,
+        # with AI_TEMPERATURE kept as a generic fallback.
+        try:
+            self.ai_temperature = float(os.getenv("RUKIYA_TEMP", os.getenv("AI_TEMPERATURE", str(self.ai_temperature))))
+            self.ai_temperature = min(2.0, max(0.0, self.ai_temperature))
+        except ValueError:
+            pass
         self.db_path = os.getenv("DB_PATH", self.db_path)
 
         # Parse integer env vars safely
