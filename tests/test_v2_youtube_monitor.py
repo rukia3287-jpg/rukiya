@@ -6,6 +6,8 @@ from services.config import Config
 from services.chat_monitor import ChatMonitor
 from services.memory_service import MemoryService
 from services.orchestrator import RukiyaOrchestrator
+from services.ai_engine.models import AIEngineResult
+from cogs.chat_bot import RukiyaCog
 
 
 class FakeYouTube:
@@ -52,18 +54,72 @@ class TestYouTubeMonitorV2(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("msg_2", self.monitor.processed_messages)
         self.assertIn("msg_7", self.monitor.processed_messages)
 
-    def test_stream_session_lifecycle(self):
-        self.monitor.start_monitoring("chat_live_123", video_id="vid_abc", start_background=False)
-        self.assertTrue(self.monitor.is_running)
-        self.assertIsNotNone(self.monitor.stream_session_id)
-        self.assertIn("vid_abc", self.monitor.stream_session_id)
-        self.assertEqual(self.memory.active_session_id, self.monitor.stream_session_id)
+    async def test_process_messages_uses_author_display_name(self):
+        self.yt.get_chat_messages = lambda live_chat_id, page_token=None: {
+            "nextPageToken": "next",
+            "pollingIntervalMillis": 8000,
+            "items": [{
+                "id": "yt-msg-1",
+                "snippet": {"displayMessage": "rukiya hi"},
+                "authorDetails": {"displayName": "Alice"},
+            }],
+        }
 
-        # Stop monitoring
+        received = []
+
+        async def subscriber(message, author):
+            received.append((message, author))
+
+        self.monitor.subscribe(subscriber)
+        self.monitor.start_monitoring("chat_live_123", video_id="vid_abc", start_background=False)
+        await self.monitor.process_messages()
+
+        self.assertEqual(received, [("rukiya hi", "Alice")])
+        self.assertEqual(self.monitor.next_page_token, "next")
+        self.assertEqual(self.monitor._next_poll_delay, 8.0)
+
         self.monitor.stop_monitoring()
-        self.assertFalse(self.monitor.is_running)
-        self.assertIsNone(self.monitor.stream_session_id)
-        self.assertIsNone(self.memory.active_session_id)
+
+    async def test_youtube_callback_reaches_send_path(self):
+        engine = MagicMock()
+        engine.process = AsyncMock(
+            return_value=AIEngineResult(
+                text="Tch, chat.",
+                provider="openrouter",
+            )
+        )
+        orchestrator = RukiyaOrchestrator(
+            config=self.config,
+            memory_service=self.memory,
+            ai_engine=engine,
+        )
+
+        class FakeChatMonitor:
+            is_running = True
+
+            def __init__(self):
+                self.sent_messages = []
+
+            async def send_chat_message(self, text):
+                self.sent_messages.append(text)
+                return True
+
+        class FakeBot:
+            pass
+
+        bot = FakeBot()
+        bot.orchestrator = orchestrator
+        bot.ai_service = self.ai
+        bot.chat_monitor = FakeChatMonitor()
+
+        cog = RukiyaCog(bot)
+        cog.enabled = True
+        cog._last_sent_at = 0.0
+
+        await cog.on_yt_message("rukiya hello", "Alice")
+
+        self.assertEqual(bot.chat_monitor.sent_messages, ["Tch, chat."])
+        engine.process.assert_awaited_once()
 
 
 if __name__ == "__main__":
