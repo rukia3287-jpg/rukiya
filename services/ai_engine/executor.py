@@ -30,21 +30,25 @@ class Executor:
         self.gemini_timeout = float(getattr(self.config, "gemini_timeout", 20.0))
         self.search_timeout = float(getattr(self.config, "search_timeout", 15.0))
         self.temperature = min(2.0, max(0.0, float(getattr(self.config, "ai_temperature", 0.85))))
+        self.reasoning_enabled = bool(getattr(self.config, "ai_reasoning_enabled", True))
+        self.reasoning_effort = str(getattr(self.config, "ai_reasoning_effort", "medium"))
+        self.max_completion_tokens = int(getattr(self.config, "ai_max_completion_tokens", 320))
 
     async def execute_generate(
         self,
         provider: AIProvider,
         messages: List[Dict[str, str]],
-        max_tokens: int = 150,
+        max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         **kwargs: Any
     ) -> AIProviderResult:
         timeout = self.openrouter_timeout if provider.name == "openrouter" else self.gemini_timeout
         resolved_temperature = self.temperature if temperature is None else min(2.0, max(0.0, float(temperature)))
+        resolved_max_tokens = self.max_completion_tokens if max_tokens is None else max(16, int(max_tokens))
         async with self.ai_semaphore:
             try:
                 return await asyncio.wait_for(
-                    provider.generate(messages=messages, max_tokens=max_tokens, temperature=resolved_temperature, **kwargs),
+                    provider.generate(messages=messages, max_tokens=resolved_max_tokens, temperature=resolved_temperature, reasoning_enabled=self.reasoning_enabled, reasoning_effort=self.reasoning_effort, **kwargs),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
