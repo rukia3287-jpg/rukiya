@@ -16,6 +16,7 @@ class YouTubeCommands(commands.Cog):
 
     @app_commands.command(name="start", description="Start monitoring a YouTube live video")
     @app_commands.describe(video_id="YouTube video id (from the watch URL)")
+    @app_commands.checks.has_permissions(administrator=True)
     async def start_monitoring(self, interaction: discord.Interaction, video_id: str):
         """Start monitoring YouTube chat (safe, non-blocking)"""
         try:
@@ -55,6 +56,7 @@ class YouTubeCommands(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="stop", description="Stop monitoring YouTube chat")
+    @app_commands.checks.has_permissions(administrator=True)
     async def stop_monitoring(self, interaction: discord.Interaction):
         try:
             if not interaction.response.is_done():
