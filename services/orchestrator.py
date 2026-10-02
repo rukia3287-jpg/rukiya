@@ -114,11 +114,13 @@ class RukiyaOrchestrator:
         generated: Optional[GeneratedResponse] = None
         if self.ai_engine is not None:
             try:
-                req_pri = RequestPriority.HIGH
-                if getattr(decision, "priority", "") == "low":
+                priority_score = float(getattr(decision, "priority", 1.0) or 0.0)
+                if priority_score < 0.50:
                     req_pri = RequestPriority.LOW
-                elif getattr(decision, "priority", "") == "medium":
+                elif priority_score < 0.75:
                     req_pri = RequestPriority.MEDIUM
+                else:
+                    req_pri = RequestPriority.HIGH
 
                 engine_req = AIEngineRequest(
                     text=message.text,
