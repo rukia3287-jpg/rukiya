@@ -46,7 +46,13 @@ class YouTubeCommands(commands.Cog):
             return
 
         # Start monitoring
-        self.bot.chat_monitor.start_monitoring(live_chat_id, video_id)
+        started = self.bot.chat_monitor.start_monitoring(live_chat_id, video_id)
+        if not started:
+            await interaction.followup.send(
+                "❌ Could not start the YouTube monitor because another monitor task is still stopping. Try /start again in a few seconds.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(title="🚀 Monitoring Started", color=discord.Color.green())
         embed.add_field(name="Video ID", value=f"`{video_id}`", inline=True)
