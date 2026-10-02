@@ -29,20 +29,22 @@ class Executor:
         self.openrouter_timeout = float(getattr(self.config, "openrouter_timeout", 20.0))
         self.gemini_timeout = float(getattr(self.config, "gemini_timeout", 20.0))
         self.search_timeout = float(getattr(self.config, "search_timeout", 15.0))
+        self.temperature = min(2.0, max(0.0, float(getattr(self.config, "ai_temperature", 0.85))))
 
     async def execute_generate(
         self,
         provider: AIProvider,
         messages: List[Dict[str, str]],
         max_tokens: int = 150,
-        temperature: float = 0.85,
+        temperature: Optional[float] = None,
         **kwargs: Any
     ) -> AIProviderResult:
         timeout = self.openrouter_timeout if provider.name == "openrouter" else self.gemini_timeout
+        resolved_temperature = self.temperature if temperature is None else min(2.0, max(0.0, float(temperature)))
         async with self.ai_semaphore:
             try:
                 return await asyncio.wait_for(
-                    provider.generate(messages=messages, max_tokens=max_tokens, temperature=temperature, **kwargs),
+                    provider.generate(messages=messages, max_tokens=max_tokens, temperature=resolved_temperature, **kwargs),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
