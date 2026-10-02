@@ -17,7 +17,7 @@ OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # Rukiya persona is centralized in services.ai_service so Discord and YouTube
-# use the same behavior rules and memory-aware style.
+# use the same intelligent, context-aware behavior rules.
 RUKIYA_SYSTEM_PROMPT = SAFE_RUKIYA_SYSTEM_PROMPT
 class RukiyaCog(commands.Cog):
     """Discord Cog — wires ChatMonitor ↔ OpenRouter for Rukiya (Bleach) persona"""
