@@ -101,6 +101,9 @@ class AIService:
         self.endpoint = getattr(self.config, "openrouter_endpoint", "https://openrouter.ai/api/v1/chat/completions")
         self.max_message_length = int(getattr(self.config, "max_message_length", 250))
         self.temperature = min(2.0, max(0.0, float(getattr(self.config, "ai_temperature", 0.85))))
+        self.reasoning_enabled = bool(getattr(self.config, "ai_reasoning_enabled", True))
+        self.reasoning_effort = str(getattr(self.config, "ai_reasoning_effort", "medium"))
+        self.max_completion_tokens = int(getattr(self.config, "ai_max_completion_tokens", 320))
 
     # ─────────────────────────────────────────────────────────────
     # Context Compression Builder
@@ -160,7 +163,7 @@ class AIService:
     # ─────────────────────────────────────────────────────────────
     # Core LLM Call
     # ─────────────────────────────────────────────────────────────
-    async def _call_openrouter(self, messages_or_prompt: Any, author: str = "viewer", max_tokens: int = 150, temperature: Optional[float] = None) -> Optional[str]:
+    async def _call_openrouter(self, messages_or_prompt: Any, author: str = "viewer", max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> Optional[str]:
         """Low-level OpenRouter call with exponential backoff."""
         if not self.openrouter_key:
             return None
@@ -188,12 +191,15 @@ class AIService:
         }
 
         resolved_temperature = self.temperature if temperature is None else min(2.0, max(0.0, float(temperature)))
+        resolved_max_tokens = self.max_completion_tokens if max_tokens is None else max(16, int(max_tokens))
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": resolved_max_tokens,
             "temperature": resolved_temperature,
         }
+        if self.reasoning_enabled and self.reasoning_effort in {"low", "medium", "high", "xhigh"}:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
 
         should_close = False
         client = self.http_client
