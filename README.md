@@ -229,12 +229,12 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 
 | Command | Permission | Description |
 |---|---|---|
-| `/ask <question> [post_to_yt]` | Everyone | Ask Rukiya a question (optionally mirror to YT chat) |
-| `/say <text>` | Everyone | Send a raw message directly to active YouTube live chat |
-| `/auto_reply [action]` | Everyone | Check status, enable, or disable YouTube auto-responder |
+| `/ask <question> [post_to_yt]` | Everyone* | Ask Rukiya a question; posting to YT requires Administrator |
+| `/say <text>` | Administrator | Send a raw message directly to active YouTube live chat |
+| `/auto_reply [action]` | Administrator | Check status, enable, or disable YouTube auto-responder |
 | `/rukiya_info` | Everyone | View Rukiya's character profile and system settings |
-| `/start <video_id>` | Everyone | Start monitoring YouTube live chat for a livestream |
-| `/stop` | Everyone | Stop monitoring YouTube live chat |
+| `/start <video_id>` | Administrator | Start monitoring YouTube live chat for a livestream |
+| `/stop` | Administrator | Stop monitoring YouTube live chat |
 | `/yt_status` | Everyone | Check live status of YouTube chat monitor |
 | `/ping` | Everyone | Check bot websocket latency |
 | `/uptime` | Everyone | View bot uptime duration |
@@ -266,3 +266,6 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 
 ### 4. Database Resilience
 - If SQLite encounters any disk or permission issues, `MemoryService` logs a warning and automatically switches to in-memory fallback mode so chat and Discord interactions continue seamlessly.
+
+
+> Permission note: `/ask` is available to everyone, but `post_to_yt=true`, `/say`, `/start`, `/stop`, and `/auto_reply` require server Administrator permissions.
