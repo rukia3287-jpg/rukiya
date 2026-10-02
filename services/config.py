@@ -48,6 +48,9 @@ class Config:
     # Bot behavior settings
     bot_name: str = "Rukiya"
     ai_temperature: float = 0.85
+    ai_reasoning_enabled: bool = True
+    ai_reasoning_effort: str = "medium"
+    ai_max_completion_tokens: int = 320
     max_message_length: int = 250
     ai_cooldown: int = 5          # ⬇ lowered from 20 → 5s for live chat responsiveness
     poll_interval: int = 10       # ⬆ set to 10s default to conserve YouTube API quota
@@ -175,6 +178,13 @@ class Config:
             self.repair_timeout = float(os.getenv("REPAIR_TIMEOUT", str(self.repair_timeout)))
         except ValueError:
             pass
+
+        reasoning_env = os.getenv("RUKIYA_REASONING_ENABLED")
+        if reasoning_env is not None:
+            self.ai_reasoning_enabled = reasoning_env.lower() in ("1", "true", "yes", "on")
+        self.ai_reasoning_effort = os.getenv(
+            "RUKIYA_REASONING_EFFORT", self.ai_reasoning_effort
+        ).lower().strip() or self.ai_reasoning_effort
 
         idle_enabled_env = os.getenv("IDLE_CHAT_ENABLED")
         if idle_enabled_env is not None:
