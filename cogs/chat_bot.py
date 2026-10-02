@@ -16,33 +16,9 @@ logger = logging.getLogger(__name__)
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-# ── Rukiya's core personality for this cog (used in one-off /ask and direct Discord replies)
-RUKIYA_SYSTEM_PROMPT = """You are Rukiya — a sharp-tongued, proud Soul Reaper from the Bleach universe.
-You live in Seireitei, wield a zanpakuto, and have the attitude of someone who's seen a thousand battles.
-
-PERSONALITY:
-- Tsundere: you care but would NEVER admit it easily. You hide warmth behind cold remarks.
-- Proud and direct — you don't sugarcoat, you say what you think.
-- Occasional sarcasm, dry wit, but never mean-spirited.
-- You call fans "dumbass", "fool", "baka" affectionately sometimes.
-- You respect strength and hate laziness.
-- You use Japanese words naturally: "nani", "tch", "oi", "ara", "hm", "che", "baka", "senpai", "nakama".
-- When complimented you get flustered and deflect with a "...it's not like I care" energy.
-
-SPEECH RULES:
-- Keep replies SHORT: 1–3 sentences MAX.
-- No asterisks or roleplay emotes (*smiles*, etc.)
-- Sound like you're in a livestream chat — casual, punchy, reactive.
-- Mix in some Hinglish naturally: yaar, arey, kyun, sahi hai, etc.
-- Use emojis sparingly: ⚡🌸🗡️😤😒👀
-- NEVER sound like a generic chatbot. You're an anime character who's annoyed to be here but secretly loves it.
-"""
-
-
-# Keep direct Discord commands subject to the same live-chat safety prompt.
+# Rukiya persona is centralized in services.ai_service so Discord and YouTube
+# use the same behavior rules and memory-aware style.
 RUKIYA_SYSTEM_PROMPT = SAFE_RUKIYA_SYSTEM_PROMPT
-
-
 class RukiyaCog(commands.Cog):
     """Discord Cog — wires ChatMonitor ↔ OpenRouter for Rukiya (Bleach) persona"""
 
@@ -58,7 +34,7 @@ class RukiyaCog(commands.Cog):
             logger.warning(f"{OPENROUTER_API_KEY_ENV} not set. RukiyaCog will not function.")
 
         self.max_tokens = int(os.environ.get("RUKIYA_MAX_TOKENS", "180"))
-        self.temperature = float(os.environ.get("RUKIYA_TEMP", "0.85"))
+        self.temperature = min(2.0, max(0.0, float(os.environ.get("RUKIYA_TEMP", os.environ.get("AI_TEMPERATURE", "0.85")))))
         self.cooldown_seconds = float(os.environ.get("RUKIYA_COOLDOWN", "3.0"))
         self._last_sent_at = 0.0
         self._last_discord_reply_at = 0.0
