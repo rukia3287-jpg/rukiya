@@ -34,6 +34,8 @@ class OpenRouterProvider(AIProvider):
         self.model = getattr(self.config, "openrouter_model", "deepseek/deepseek-r1")
         self.endpoint = getattr(self.config, "openrouter_endpoint", "https://openrouter.ai/api/v1/chat/completions")
         self.timeout = float(getattr(self.config, "openrouter_timeout", 20.0))
+        self.reasoning_enabled = bool(getattr(self.config, "ai_reasoning_enabled", True))
+        self.reasoning_effort = str(getattr(self.config, "ai_reasoning_effort", "medium"))
 
     def is_configured(self) -> bool:
         return bool(self.api_key and self.api_key.strip())
@@ -62,9 +64,13 @@ class OpenRouterProvider(AIProvider):
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
             "temperature": temperature,
         }
+        reasoning_enabled = kwargs.get("reasoning_enabled", self.reasoning_enabled)
+        reasoning_effort = str(kwargs.get("reasoning_effort", self.reasoning_effort)).lower()
+        if reasoning_enabled and reasoning_effort in {"low", "medium", "high", "xhigh"}:
+            payload["reasoning"] = {"effort": reasoning_effort}
 
         start_time = time.time()
         should_close = False
