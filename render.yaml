@@ -14,6 +14,18 @@ services:
       sync: false
     - key: OPENROUTER_MODEL
       sync: false
+    - key: GEMINI_API_KEY
+      sync: false
+    - key: GEMINI_MODEL
+      value: gemini-3.5-flash-lite
+    - key: GEMINI_SEARCH_ENABLED
+      value: "true"
+    - key: GEMINI_SEARCH_DAILY_LIMIT
+      value: "450"
+    - key: YOUTUBE_VIDEO_ID
+      sync: false
+    - key: RUKIYA_AUTO_REPLY
+      value: "true"
     - key: CLIENT_SECRET_JSON
       sync: false
     - key: TOKEN_JSON
