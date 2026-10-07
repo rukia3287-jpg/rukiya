@@ -34,6 +34,20 @@ class TestDecisionService(unittest.TestCase):
         self.assertIn("direct mention", decision.reason.lower())
         self.assertTrue(decision.priority > 0.5)
 
+    def test_discord_bot_mention_is_direct(self):
+        msg = ChatMessage(
+            platform="discord",
+            message_id="m_discord_1",
+            user_id="123",
+            username="Alice",
+            display_name="Alice",
+            text="<@999> hey there",
+            raw_event={"bot_user_id": 999, "mention_ids": ["999"]},
+        )
+        decision = self.decision_svc.decide(msg, self.user)
+        self.assertTrue(decision.should_respond)
+        self.assertIn("direct mention", decision.reason.lower())
+
     def test_direct_question_receives_high_priority(self):
         msg = ChatMessage(
             platform="youtube",
