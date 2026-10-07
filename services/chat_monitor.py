@@ -214,13 +214,14 @@ class ChatMonitor:
                 if not message or not message_id or message_id in self.processed_messages:
                     continue
 
-                # Add to bounded LRU cache
+                # Deliver first, then mark as processed. If every subscriber fails,
+                # the message remains eligible for a later poll instead of being lost.
+                self._last_activity_at = time.monotonic()
+                await self._notify_subscribers(message, author)
+
                 self.processed_messages[message_id] = time.monotonic()
                 if len(self.processed_messages) > self.processed_messages_max:
                     self.processed_messages.popitem(last=False)
-
-                self._last_activity_at = time.monotonic()
-                await self._notify_subscribers(message, author)
             await self._maybe_send_idle_message()
         except asyncio.CancelledError:
             raise
