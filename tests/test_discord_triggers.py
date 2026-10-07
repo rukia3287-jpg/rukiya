@@ -71,6 +71,33 @@ class DiscordTriggerTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_message(msg)
         msg.reply.assert_called_once_with("Oi. What do you want?", mention_author=False)
 
+
+
+    async def test_direct_call_is_not_blocked_by_previous_user(self):
+        first_user = FakeUser(id=222, name="Alice", bot=False)
+        second_user = FakeUser(id=333, name="Bob", bot=False)
+        ai_mock = MagicMock()
+        ai_mock.generate_response = AsyncMock(side_effect=["First reply", "Second reply"])
+        self.bot.ai_service = ai_mock
+        self.cog.discord_cooldown_seconds = 10.0
+
+        await self.cog.on_message(FakeMessage("hey rukiya", first_user))
+        await self.cog.on_message(FakeMessage("hey rukiya", second_user))
+
+        self.assertEqual(ai_mock.generate_response.await_count, 2)
+
+    async def test_direct_call_uses_independent_user_cooldown(self):
+        user = FakeUser(id=222, name="Alice", bot=False)
+        ai_mock = MagicMock()
+        ai_mock.generate_response = AsyncMock(return_value="Reply")
+        self.bot.ai_service = ai_mock
+        self.cog.discord_cooldown_seconds = 10.0
+
+        await self.cog.on_message(FakeMessage("hey rukiya", user))
+        await self.cog.on_message(FakeMessage("hey rukiya again", user))
+
+        self.assertEqual(ai_mock.generate_response.await_count, 1)
+
     async def test_trigger_on_tag_mention(self):
         user = FakeUser(id=222, name="Alice", bot=False)
         msg = FakeMessage(f"<@{self.bot_user.id}> who is the strongest?", author=user, mentions=[self.bot_user])
