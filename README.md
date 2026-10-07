@@ -124,7 +124,7 @@ Rukiya integrates a production-hardened multi-provider control layer:
 - **OpenRouter**: Primary provider for conversation, personality responses, memory-driven chat, and final Rukiya-style persona rendering.
 - **Gemini (`gemini-3.5-flash-lite`)**: Grounded generation and Google Search integration via the official `google-genai` SDK and `google_search` grounding tool.
 - **Independent Capabilities**: `gemini_generation` and `gemini_search` maintain separated circuit breakers, health decay, and capability states (`AVAILABLE`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, etc.). A search outage never disables generation.
-- **Fail-Fast 429 & Negative Caching**: HTTP 429 rate limit or quota errors fail fast in milliseconds (no 15s timeout wait) and are negatively cached to prevent provider hammer.
+- **Fail-Fast 429 & Negative Caching**: HTTP 429 rate limits fail fast without repeated immediate retries and are negatively cached to prevent provider hammering; transient server errors such as 503 may retry with bounded backoff.
 - **Accurate Fallback Telemetry**: When search is degraded and OpenRouter generates the answer, telemetry transparently records `planned_route="hybrid"`, `executed_route="degraded_hybrid"`, `fallback_used=True`, `fallback_reason="gemini_search_rate_limited"`, and `verified_current_information=False`.
 - **Anti-Hallucination Boundaries**: When real-time verification fails, the prompt compiler injects explicit non-fabrication directives and the Self-Critic enforces transparent admission rather than unverified live price/news claims.
 - **In-flight Deduplication & Search Caching**: Identical concurrent queries join an active in-flight task to eliminate redundant API calls.
@@ -172,38 +172,38 @@ The web server will start on port `8080` (or `$PORT`) exposing:
 
 ## 🧪 Testing
 
-The repository features comprehensive automated test coverage (54 unit and regression tests) that do not require real API credentials or production OAuth tokens:
+The repository includes a broad unit and regression test suite that does not require real API credentials or production OAuth tokens.
 
 Run the entire test suite:
 ```bash
-python -m pytest
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 Run specific test modules:
 ```bash
 # Goal regressions (Quota handling, safety contracts, sleep intervals)
-python -m pytest tests/test_goal_regressions.py
+python -m unittest tests/test_goal_regressions.py
 
 # Discord trigger tests
-python -m pytest tests/test_discord_triggers.py
+python -m unittest tests/test_discord_triggers.py
 
 # Slash command tests
-python -m pytest tests/test_slash_commands.py
+python -m unittest tests/test_slash_commands.py
 
 # V2 Decision Engine
-python -m pytest tests/test_v2_decision.py
+python -m unittest tests/test_v2_decision.py
 
 # V2 Dual-Scope Memory & Identity
-python -m pytest tests/test_v2_memory_and_identity.py
+python -m unittest tests/test_v2_memory_and_identity.py
 
 # V2 Safety & Rate Limiting
-python -m pytest tests/test_v2_safety_and_ratelimit.py
+python -m unittest tests/test_v2_safety_and_ratelimit.py
 
 # V2 Orchestrator Pipeline
-python -m pytest tests/test_v2_orchestrator.py
+python -m unittest tests/test_v2_orchestrator.py
 
 # V2 Invariants & Security (Prompt injection, leak prevention)
-python -m pytest tests/test_v2_invariants_and_security.py
+python -m unittest tests/test_v2_invariants_and_security.py
 ```
 
 ---
@@ -254,7 +254,7 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 - **Symptom**: `OPENROUTER_API_KEY not set. AIService disabled.`
 - **Fix**: Verify `OPENROUTER_API_KEY` is present in your `.env` or Render environment.
 - **Symptom**: HTTP 429 / 503 from OpenRouter.
-- **Fix**: The orchestrator automatically uses safe in-character fallbacks (`"Give me a second, chat."`) and applies exponential backoff up to 3 retries without crashing the bot.
+- **Behavior**: HTTP 429 fails fast and is classified as a rate-limit event so the engine can switch capability/routes immediately. HTTP 503 remains retryable with bounded exponential backoff.
 
 ### 2. YouTube Quota Exceeded (`quotaExceeded`)
 - **Symptom**: `YouTube quota exhausted; monitoring stops without retry`
