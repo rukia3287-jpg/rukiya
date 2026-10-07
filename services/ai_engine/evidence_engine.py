@@ -59,9 +59,13 @@ class EvidenceEngine:
 
             # 1. Authority Score
             authority = 0.50
-            domain = urlparse(url).netloc.lower()
+            domain = urlparse(url).netloc.lower().split(":", 1)[0].rstrip(".")
             for auth_key, score in AUTHORITY_DOMAINS.items():
-                if auth_key in domain or auth_key in url.lower():
+                if auth_key.startswith("."):
+                    matches_domain = domain.endswith(auth_key)
+                else:
+                    matches_domain = domain == auth_key or domain.endswith("." + auth_key)
+                if matches_domain:
                     authority = max(authority, score)
 
             # 2. Relevance Score
