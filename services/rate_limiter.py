@@ -63,13 +63,15 @@ class RateLimiter:
         global_cap = getattr(self.config, "rate_limit_global_capacity", 10)
         user_cap = getattr(self.config, "rate_limit_user_capacity", 2)
         idle_int = getattr(self.config, "rate_limit_idle_interval", 180.0)
+        idle_cap = getattr(self.config, "rate_limit_idle_capacity", 1)
+        discord_cap = getattr(self.config, "rate_limit_discord_capacity", 5)
 
         self._default_specs = {
             "global_ai": (global_cap, 1.0),                  # 10 burst, refill 1/s
             "user_ai": (user_cap, 0.2),                      # 2 burst, refill 1 every 5s
             "youtube_send": (5, 0.5),                        # 5 burst, refill 1 every 2s
-            "idle_chat": (1, 1.0 / max(1.0, idle_int)),      # 1 token every idle_interval
-            "discord_ai": (5, 0.5),                          # 5 burst, refill 1 every 2s
+            "idle_chat": (idle_cap, 1.0 / max(1.0, idle_int)),  # configurable burst, then 1 token per idle interval
+            "discord_ai": (discord_cap, 0.5),                          # 5 burst, refill 1 every 2s
         }
 
     def _get_bucket_key(self, bucket_type: str, key: Optional[str] = None) -> str:
