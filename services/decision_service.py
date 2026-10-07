@@ -53,7 +53,7 @@ class DecisionService:
         msg_lower = message.text.lower()
         banned = {w.lower() for w in getattr(self.config, "banned_words", set())}
         for w in banned:
-            if w in msg_lower:
+            if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", msg_lower):
                 return False, f"message contains banned word '{w}'"
 
         return True, ""
@@ -62,8 +62,9 @@ class DecisionService:
         """Check if message contains a configured trigger word or mention."""
         msg_lower = text.lower()
         triggers = {t.lower() for t in getattr(self.config, "ai_triggers", set())}
-        for trigger in triggers:
-            if trigger in msg_lower:
+        for trigger in sorted(triggers, key=len, reverse=True):
+            pattern = rf"(?<!\w){re.escape(trigger)}(?!\w)"
+            if re.search(pattern, msg_lower):
                 return True, trigger
         return False, None
 
