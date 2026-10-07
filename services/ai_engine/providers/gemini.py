@@ -418,8 +418,15 @@ class SearchEngine:
                 req_id, attempt_id, transport
             )
 
-            def _sync_call():
-                try:
+            # Select exactly one synchronous API interface before dispatch.
+            # A provider/API failure must be returned to the caller, never retried through
+            # a second transport, because that can duplicate paid/side-effecting requests.
+            sync_models = getattr(client, "models", None)
+            sync_generate = getattr(sync_models, "generate_content", None)
+            legacy_generate = getattr(client, "generate_content", None)
+
+            if callable(sync_generate):
+                def _sync_call():
                     from google.genai import types  # type: ignore
                     cfg_kwargs = {
                         "tools": [{"google_search": {}}],
@@ -432,20 +439,16 @@ class SearchEngine:
                     else:
                         cfg_kwargs["automatic_function_calling"] = {"disable": True}
                     config = types.GenerateContentConfig(**cfg_kwargs)
-                    return client.models.generate_content(
+                    return sync_generate(
                         model=self.client_manager.model,
                         contents=prompt,
                         config=config
                     )
-                except Exception as inner_e:
-                    if hasattr(client, "generate_content"):
-                        return client.generate_content(prompt, tools=["google_search"])
-                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
-                        return client.models.generate_content(
-                            model=self.client_manager.model,
-                            contents=prompt
-                        )
-                    raise inner_e
+            elif callable(legacy_generate):
+                def _sync_call():
+                    return legacy_generate(prompt, tools=["google_search"])
+            else:
+                raise RuntimeError("Gemini client has no supported synchronous generation interface")
 
             loop = asyncio.get_running_loop()
             try:
@@ -591,28 +594,30 @@ class GenerationEngine:
                 req_id, attempt_id, transport
             )
 
-            def _call_gemini():
-                try:
+            # Select exactly one synchronous API interface before dispatch.
+            # Never fall through to another API call after a provider exception.
+            sync_models = getattr(client, "models", None)
+            sync_generate = getattr(sync_models, "generate_content", None)
+            legacy_generate = getattr(client, "generate_content", None)
+
+            if callable(sync_generate):
+                def _call_gemini():
                     from google.genai import types  # type: ignore
                     config = types.GenerateContentConfig(
                         temperature=temperature,
                         max_output_tokens=max_tokens,
                         system_instruction=system_instruction
                     )
-                    return client.models.generate_content(
+                    return sync_generate(
                         model=self.client_manager.model,
                         contents=contents,
                         config=config
                     )
-                except Exception as inner_e:
-                    if hasattr(client, "generate_content"):
-                        return client.generate_content(contents)
-                    if hasattr(client, "models") and hasattr(client.models, "generate_content"):
-                        return client.models.generate_content(
-                            model=self.client_manager.model,
-                            contents=contents
-                        )
-                    raise inner_e
+            elif callable(legacy_generate):
+                def _call_gemini():
+                    return legacy_generate(contents)
+            else:
+                raise RuntimeError("Gemini client has no supported synchronous generation interface")
 
             loop = asyncio.get_running_loop()
             try:
