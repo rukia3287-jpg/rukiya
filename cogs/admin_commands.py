@@ -24,7 +24,8 @@ def mask_secret(secret: Optional[str]) -> str:
     clean = str(secret).strip()
     if len(clean) <= 6:
         return "✅ [SET]"
-    return f"`{clean[:3]}...{clean[-3:]}` (Valid)"
+    # Never expose even partial credential material in Discord diagnostics.
+    return "✅ [SET]"
 
 
 class AdminCommands(commands.Cog):
