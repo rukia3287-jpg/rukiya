@@ -37,7 +37,8 @@ class RukiyaCog(commands.Cog):
         self.temperature = min(2.0, max(0.0, float(os.environ.get("RUKIYA_TEMP", os.environ.get("AI_TEMPERATURE", "0.85")))))
         self.cooldown_seconds = float(os.environ.get("RUKIYA_COOLDOWN", "3.0"))
         self._last_sent_at = 0.0
-        self._last_discord_reply_at = 0.0
+        # Discord cooldown is per-user. YouTube/auto-reply activity is separate.
+        self._last_discord_reply_at = {}
         self.discord_cooldown_seconds = float(os.environ.get("RUKIYA_DISCORD_COOLDOWN", "2.0"))
         self._name_pattern = re.compile(r"\b(rukiya|rukia|ruki)\b", re.IGNORECASE)
 
@@ -87,9 +88,12 @@ class RukiyaCog(commands.Cog):
         if not (is_tagged or is_named):
             return
 
-        # Cooldown check for Discord replies
+        # Cooldown is per Discord user, so one user's recent reply cannot
+        # silence another user's explicit call to Rukiya.
         now = asyncio.get_event_loop().time()
-        if now - self._last_discord_reply_at < self.discord_cooldown_seconds:
+        user_id = message.author.id
+        last_user_reply = self._last_discord_reply_at.get(user_id, 0.0)
+        if now - last_user_reply < self.discord_cooldown_seconds:
             return
 
         # Clean prompt by stripping bot mention tag
@@ -126,7 +130,7 @@ class RukiyaCog(commands.Cog):
                     reply = await self.generate_reply(cleaned_text, author=message.author.display_name)
 
                 if reply:
-                    self._last_discord_reply_at = asyncio.get_event_loop().time()
+                    self._last_discord_reply_at[user_id] = asyncio.get_event_loop().time()
                     await message.reply(reply, mention_author=False)
         except Exception as e:
             logger.exception(f"Failed to reply to Discord message: {e}")
