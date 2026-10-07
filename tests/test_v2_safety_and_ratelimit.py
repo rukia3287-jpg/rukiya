@@ -75,6 +75,16 @@ class TestRateLimiter(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertGreater(wait, 0.0)
 
+    def test_configured_idle_and_discord_capacities_are_used(self):
+        config = Config(
+            rate_limit_idle_capacity=2,
+            rate_limit_discord_capacity=4,
+            rate_limit_idle_interval=60,
+        )
+        limiter = RateLimiter(config)
+        self.assertEqual(limiter.get_remaining("idle_chat"), 2.0)
+        self.assertEqual(limiter.get_remaining("discord_ai"), 4.0)
+
     def test_user_and_global_buckets_separated(self):
         # User 1 consumes their budget
         res1 = self.limiter.allow("user_ai", key="user_1")
