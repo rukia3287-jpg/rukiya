@@ -62,8 +62,9 @@ class IdentityService:
         if self.memory_service:
             existing = self.memory_service.get_user(canonical_id)
             if existing:
-                # Update display name / username if changed, update last seen
-                existing.last_seen = message.timestamp
+                # Update mutable profile fields only. last_seen is intentionally
+                # updated by MemoryService.record_interaction() AFTER the DecisionService
+                # evaluates continuity, otherwise every message appears brand new.
                 if display_name and display_name != existing.display_name:
                     existing.display_name = display_name
                 if username and username != existing.username:
