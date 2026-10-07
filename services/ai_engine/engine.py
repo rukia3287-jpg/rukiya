@@ -99,7 +99,8 @@ class AIEngine:
         query: str,
         category: str = "general",
         time_scope: str = "",
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Tuple[SearchResult, bool]:
         """Fetch search result from positive cache, negative cache, in-flight task, or Gemini provider."""
         # 1. Check positive cache
@@ -202,7 +203,7 @@ class AIEngine:
                 error_details=None
             )
             # Record in budget & positive cache
-            self.budget_manager.record_search()
+            self.budget_manager.record_search(user_id=user_id)
             self.cache.set(query, sr, category=category, time_scope=time_scope)
             return sr
 
@@ -321,7 +322,11 @@ class AIEngine:
                 time_scope = plan.search_queries[0].time_scope if plan.search_queries else ""
 
                 sr, hit = await self._execute_search_grounding(
-                    query_to_search, category=category, time_scope=time_scope, request_id=request_id
+                    query_to_search,
+                    category=category,
+                    time_scope=time_scope,
+                    request_id=request_id,
+                    user_id=request.user_id,
                 )
                 cache_hit = hit
                 citations = sr.citations
@@ -502,7 +507,14 @@ class AIEngine:
 
         # 5. Output Validation
         if not fallback_used:
-            validated = validate_rukiya_response(candidate_text)
+            fallback_text = self.get_fallback(plan.intent)
+            validated = validate_rukiya_response(candidate_text, fallback=fallback_text)
+            if validated == fallback_text and candidate_text.strip() != fallback_text:
+                fallback_used = True
+                fallback_reason = fallback_reason or "output_safety_rejected"
+                provider_used = "static_fallback"
+                final_provider = "static_fallback"
+
             max_len = int(getattr(self.config, "max_message_length", 250))
             if len(validated) > max_len:
                 trimmed = validated[:max_len]
