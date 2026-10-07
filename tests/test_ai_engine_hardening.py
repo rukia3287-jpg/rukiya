@@ -472,6 +472,97 @@ class TestAIEngineHardening(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(async_mock.await_count, 1)
         self.assertEqual(res2.error_details.category, ErrorCategory.RATE_LIMITED)
 
+    async def test_user_search_budget_is_enforced(self):
+        """Search usage must count against the requesting user's daily AI budget."""
+        budget = BudgetManager(self.config, daily_search_limit=10, user_daily_limit=1)
+        engine = AIEngine(config=self.config, registry=self.registry, budget_manager=budget)
+
+        self.mock_gem.search_mock.return_value = AIProviderResult(
+            text="Fresh grounded result.",
+            provider="gemini",
+            used_search=True,
+            citations=[{"url": "https://example.com", "title": "Example"}],
+        )
+        self.mock_or.generate_mock.return_value = AIProviderResult(
+            text="I can answer from OpenRouter.",
+            provider="openrouter",
+        )
+
+        first = await engine.process(
+            AIEngineRequest(
+                text="latest genshin update for user budget test one",
+                author="same-user",
+                user_id="same-user",
+                intent="question",
+            )
+        )
+        self.assertTrue(first.search_attempted)
+        self.assertEqual(budget.user_counts["same-user"], 1)
+
+        second = await engine.process(
+            AIEngineRequest(
+                text="latest genshin update for user budget test two",
+                author="same-user",
+                user_id="same-user",
+                intent="question",
+            )
+        )
+        self.assertFalse(second.search_attempted)
+        self.assertEqual(self.mock_gem.search_mock.await_count, 1)
+
+    async def test_openrouter_429_is_structured_and_fails_fast(self):
+        """OpenRouter 429 must produce structured rate-limit telemetry after one request."""
+        from services.ai_engine.providers.openrouter import OpenRouterProvider
+
+        config = Config(openrouter_api_key="mock-openrouter")
+        response = MagicMock()
+        response.status_code = 429
+        response.text = "too many requests"
+        client = MagicMock()
+        client.post = AsyncMock(return_value=response)
+
+        provider = OpenRouterProvider(config, http_client=client)
+        result = await provider.generate(
+            [{"role": "user", "content": "hello"}],
+            max_tokens=20,
+        )
+
+        client.post.assert_awaited_once()
+        self.assertEqual(result.error_category, ErrorCategory.RATE_LIMITED)
+        self.assertEqual(result.status_code, 429)
+        self.assertIsNotNone(result.error_details)
+        self.assertFalse(result.error_details.retryable)
+
+    async def test_gemini_sync_provider_error_does_not_trigger_second_transport(self):
+        """A sync Gemini API failure must not call a legacy API interface as a hidden retry."""
+        class FakeModels:
+            def __init__(self):
+                self.calls = 0
+
+            def generate_content(self, **kwargs):
+                self.calls += 1
+                raise RuntimeError("provider failure")
+
+        class FakeClient:
+            def __init__(self):
+                self.models = FakeModels()
+                self.legacy_calls = 0
+
+            def generate_content(self, *args, **kwargs):
+                self.legacy_calls += 1
+                return object()
+
+        fake_client = FakeClient()
+        provider = GeminiProvider(client=fake_client)
+        result = await provider.generate(
+            [{"role": "system", "content": "Answer briefly."}, {"role": "user", "content": "hello"}],
+            max_tokens=20,
+        )
+
+        self.assertIsNotNone(result.error_details)
+        self.assertEqual(fake_client.models.calls, 1)
+        self.assertEqual(fake_client.legacy_calls, 0)
+
     async def test_clean_shutdown(self):
         """aclose() cleans up in-flight deduplicator tasks without throwing."""
         await self.engine.aclose()
