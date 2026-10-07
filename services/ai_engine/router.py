@@ -25,24 +25,44 @@ class Router:
         plan: Plan,
         request: AIEngineRequest,
         health: ProviderHealthTracker,
-        budget: BudgetManager
+        budget: BudgetManager,
+        registry: Optional[object] = None,
     ) -> RouteType:
-        # Check provider and capability availability independently
-        or_avail = health.is_available("openrouter") and budget.can_execute_ai("openrouter", request.user_id)
-        
-        # Generation capability
+        # Provider configuration and capability availability are separate concerns.
+        # When a registry is supplied, an unconfigured/missing provider is never routed to.
+        openrouter_provider = registry.get("openrouter") if registry and hasattr(registry, "get") else None
+        gemini_provider = registry.get("gemini") if registry and hasattr(registry, "get") else None
+
+        or_configured = (
+            openrouter_provider.is_configured()
+            if openrouter_provider is not None and hasattr(openrouter_provider, "is_configured")
+            else True
+        )
+        gem_configured = (
+            gemini_provider.is_configured()
+            if gemini_provider is not None and hasattr(gemini_provider, "is_configured")
+            else True
+        )
+
+        # Use explicit capability keys. Do not fall back to a provider-level alias,
+        # because Gemini generation and Gemini search have independent circuit states.
+        or_avail = (
+            or_configured
+            and health.is_available("openrouter", capability="generation")
+            and budget.can_execute_ai("openrouter", request.user_id)
+        )
+
         gem_gen_avail = (
-            health.is_available("gemini:generation") 
-            if "gemini:generation" in getattr(health, "circuits", {}) 
-            else health.is_available("gemini")
-        ) and budget.can_execute_ai("gemini", request.user_id)
-        
-        # Search capability is independent of generation capability
+            gem_configured
+            and health.is_available("gemini", capability="generation")
+            and budget.can_execute_ai("gemini", request.user_id)
+        )
+
         gem_search_avail = (
-            health.is_available("gemini:search")
-            if "gemini:search" in getattr(health, "circuits", {})
-            else health.is_available("gemini")
-        ) and budget.can_search(request.user_id)
+            gem_configured
+            and health.is_available("gemini", capability="search")
+            and budget.can_search(request.user_id)
+        )
 
         # Enforce capability state consistency: never route to search if capability is RATE_LIMITED/QUOTA_EXHAUSTED
         if hasattr(health, "get_capability_state"):
