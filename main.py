@@ -152,5 +152,8 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
+    except Exception:
+        # Preserve a non-zero process exit code so Render/systemd/Kubernetes
+        # can detect a real startup crash and restart the service.
+        logger.exception("Failed to start bot")
+        raise
