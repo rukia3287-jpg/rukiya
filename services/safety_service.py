@@ -121,7 +121,7 @@ class SafetyService:
             banned = {w.lower() for w in getattr(self.config, "banned_words", set())}
             msg_lower = text.lower()
             for b in banned:
-                if b in msg_lower:
+                if re.search(rf"(?<!\w){re.escape(b)}(?!\w)", msg_lower):
                     flagged.append(f"banned_word:{b}")
 
         if flagged:
