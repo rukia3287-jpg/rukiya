@@ -108,6 +108,21 @@ class TestDecisionService(unittest.TestCase):
         decision = self.decision_svc.decide(msg, self.user)
         self.assertFalse(decision.should_respond)
 
+    def test_continuity_uses_previous_last_seen_timestamp(self):
+        """A user's prior last_seen must be old enough for continuity to decay."""
+        import time
+
+        user = UserIdentity(
+            canonical_id="youtube:UC_continuity",
+            platform="youtube",
+            user_id="UC_continuity",
+            username="continuity",
+            display_name="Continuity",
+            last_seen=time.time() - (60 * 30),
+        )
+        score = self.decision_svc.calculate_conversation_continuity(user)
+        self.assertLess(score, 0.2)
+
     def test_anti_repetition_similarity_rejection(self):
         resp1 = "Tch. Don't be reckless, Ichigo. Keep your guard up."
         resp2 = "Tch. Don't be reckless, Ichigo. Keep your guard up now."
