@@ -62,12 +62,14 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Check API key configuration safely without leaking
+        # The V2 orchestrator can use Gemini or another registered provider,
+        # so /test_ai should not incorrectly fail just because OpenRouter is absent.
         openrouter_key = getattr(ai, "openrouter_key", None)
-        if not openrouter_key:
+        has_v2_engine = bool(getattr(orch, "ai_engine", None))
+
+        if not openrouter_key and not has_v2_engine:
             await interaction.followup.send(
-                "❌ `OPENROUTER_API_KEY` is **not set** in environment variables.\n"
-                "Add it in Render → Environment → `OPENROUTER_API_KEY`.",
+                "❌ No usable AI provider is configured. Set `OPENROUTER_API_KEY` and/or `GEMINI_API_KEY`.",
                 ephemeral=True
             )
             return
