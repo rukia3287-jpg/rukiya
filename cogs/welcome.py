@@ -40,7 +40,12 @@ class Welcome(commands.Cog):
                 welcome_msg = f"Welcome {member.display_name}! 🎉"
                 if self.ai:
                     try:
-                        maybe = await self.ai.generate_response(f"Write a friendly short welcome for {member.display_name}", "welcome-bot")
+                        maybe = await self.ai.generate_response(
+                            f"Write a friendly short welcome for {member.display_name}",
+                            "welcome-bot",
+                            bypass_trigger=True,
+                            bypass_cooldown=True,
+                        )
                         if maybe:
                             welcome_msg = maybe
                     except Exception:
@@ -66,7 +71,12 @@ class Welcome(commands.Cog):
         cm = getattr(self.bot, "chat_monitor", None)
         if not text:
             if self.ai:
-                text = await self.ai.generate_response("Generate a short friendly welcome message", "welcome-cmd")
+                text = await self.ai.generate_response(
+                    "Generate a short friendly welcome message",
+                    "welcome-cmd",
+                    bypass_trigger=True,
+                    bypass_cooldown=True,
+                )
             if not text:
                 text = "Welcome everyone! 🎉"
 
