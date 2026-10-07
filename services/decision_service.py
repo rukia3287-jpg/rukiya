@@ -258,10 +258,20 @@ class DecisionService:
         # A configured trigger (e.g. "rukiya") is a direct call. Discord mentions
         # are resolved from raw_event/mention_ids when available. Do not compare
         # a channel_id to a user mention; those are different snowflakes.
-        bot_user_id = None
         raw_event = getattr(message, "raw_event", None)
-        if raw_event is not None:
-            bot_user_id = getattr(getattr(raw_event, "author", None), "id", None)
+        bot_user_id = None
+
+        # Discord raw events may carry the bot/user ID explicitly. When they
+        # do not, the normalized message can still expose it through the
+        # mention list. Trigger matching is also handled by the Cog.
+        if isinstance(raw_event, dict):
+            bot_user_id = (
+                raw_event.get("bot_user_id")
+                or raw_event.get("bot_id")
+                or raw_event.get("self_user_id")
+            )
+        elif raw_event is not None:
+            bot_user_id = getattr(raw_event, "bot_user_id", None)
 
         mention_ids = set()
         if isinstance(raw_event, dict):
@@ -272,11 +282,13 @@ class DecisionService:
 
         is_discord_bot_mention = bool(
             message.platform == "discord"
-            and bot_user_id is not None
             and (
-                str(bot_user_id) in mention_ids
-                or f"<@{bot_user_id}>" in message.text
-                or f"<@!{bot_user_id}>" in message.text
+                (bot_user_id is not None and (
+                    str(bot_user_id) in mention_ids
+                    or f"<@{bot_user_id}>" in message.text
+                    or f"<@!{bot_user_id}>" in message.text
+                ))
+                or "discord_bot_mention" in mention_ids
             )
         )
 
