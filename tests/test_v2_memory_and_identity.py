@@ -58,6 +58,35 @@ class TestIdentityService(unittest.TestCase):
         self.assertEqual(user1.canonical_id, "youtube:UC_A")
         self.assertEqual(user2.canonical_id, "discord:987654321")
 
+    def test_resolve_does_not_advance_last_seen_before_decision(self):
+        first = ChatMessage(
+            platform="youtube",
+            message_id="m_last_seen_1",
+            user_id="UC_last_seen",
+            username="viewer",
+            display_name="Viewer",
+            text="hello",
+            timestamp=1000.0,
+        )
+        user = self.identity.resolve(first)
+        self.memory.record_interaction(user, first.text, role="user")
+        previous_last_seen = user.last_seen
+
+        second = ChatMessage(
+            platform="youtube",
+            message_id="m_last_seen_2",
+            user_id="UC_last_seen",
+            username="viewer",
+            display_name="Viewer",
+            text="follow up",
+            timestamp=1900.0,
+        )
+        resolved = self.identity.resolve(second)
+
+        self.assertEqual(resolved.canonical_id, user.canonical_id)
+        self.assertEqual(resolved.last_seen, previous_last_seen)
+        self.assertEqual(resolved.last_seen, 1000.0)
+
     def test_explicit_link_identities(self):
         self.identity.link_identities("discord:111", "youtube:UC_222")
         msg = ChatMessage(
