@@ -217,7 +217,13 @@ class AIEngine:
         plan = self.planner.plan(request)
 
         # 2. Routing
-        route = self.router.route(plan, request, self.health_tracker, self.budget_manager)
+        route = self.router.route(
+            plan,
+            request,
+            self.health_tracker,
+            self.budget_manager,
+            registry=self.registry,
+        )
 
         logger.info(
             "event=ai_engine_route req_id=%s route=%s intent=%s complexity=%.2f search_req=%s",
