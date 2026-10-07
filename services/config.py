@@ -160,7 +160,7 @@ class Config:
             self.gemini_search_cache_ttl = int(os.getenv("GEMINI_SEARCH_CACHE_TTL", str(self.gemini_search_cache_ttl)))
             self.ai_max_repair_attempts = int(os.getenv("AI_MAX_REPAIR_ATTEMPTS", str(self.ai_max_repair_attempts)))
             self.ai_max_planner_steps = int(os.getenv("AI_MAX_PLANNER_STEPS", str(self.ai_max_planner_steps)))
-            self.ai_max_completion_tokens = max(64, min(2000, int(os.getenv("RUKIYA_MAX_COMPLETION_TOKENS", str(self.ai_max_completion_tokens))))
+            self.ai_max_completion_tokens = max(\n                64,\n                min(\n                    2000,\n                    int(os.getenv("RUKIYA_MAX_COMPLETION_TOKENS", str(self.ai_max_completion_tokens))),\n                ),\n            )
             self.max_ai_concurrency = int(os.getenv("MAX_AI_CONCURRENCY", str(self.max_ai_concurrency)))
             self.max_search_concurrency = int(os.getenv("MAX_SEARCH_CONCURRENCY", str(self.max_search_concurrency)))
         except ValueError:
