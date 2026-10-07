@@ -33,9 +33,23 @@ class RukiyaCog(commands.Cog):
         if not self.api_key:
             logger.warning(f"{OPENROUTER_API_KEY_ENV} not set. RukiyaCog will not function.")
 
-        self.max_tokens = int(os.environ.get("RUKIYA_MAX_TOKENS", "180"))
-        self.temperature = min(2.0, max(0.0, float(os.environ.get("RUKIYA_TEMP", os.environ.get("AI_TEMPERATURE", "0.85")))))
-        self.cooldown_seconds = float(os.environ.get("RUKIYA_COOLDOWN", "3.0"))
+        try:
+            self.max_tokens = max(16, int(os.environ.get("RUKIYA_MAX_TOKENS", "180")))
+        except (TypeError, ValueError):
+            self.max_tokens = 180
+
+        try:
+            self.temperature = min(
+                2.0,
+                max(0.0, float(os.environ.get("RUKIYA_TEMP", os.environ.get("AI_TEMPERATURE", "0.85"))))
+            )
+        except (TypeError, ValueError):
+            self.temperature = 0.85
+
+        try:
+            self.cooldown_seconds = max(0.0, float(os.environ.get("RUKIYA_COOLDOWN", "3.0")))
+        except (TypeError, ValueError):
+            self.cooldown_seconds = 3.0
         self._last_sent_at = 0.0
         # Discord cooldown is per-user. YouTube/auto-reply activity is separate.
         self._last_discord_reply_at = {}
