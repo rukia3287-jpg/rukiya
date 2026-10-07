@@ -59,7 +59,7 @@ class Critic:
         # 2. Safety Check (Explicit or harmful terms)
         banned = getattr(self.config, "banned_words", set())
         for b in banned:
-            if b in text_lower:
+            if re.search(rf"(?<!\w){re.escape(b)}(?!\w)", text_lower):
                 return CriticReport(
                     verdict=CriticVerdict.REJECT,
                     score=0.0,
