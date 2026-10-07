@@ -218,7 +218,7 @@ class ContextCompiler:
             "Reply as Rukiya in one short sentence. 1-3 short sentences MAX. "
             "First identify the language of the CURRENT viewer message, then answer in that same language. "
             "Preserve Roman/Latin script when the viewer uses Romanized language. "
-            "Do not translate a Romanized Indian-language message into English. "
+            "Do not translate Romanized Indian languages into English. "
             "Do not switch scripts unless explicitly asked. "
             "Answer the viewer's actual question or statement directly; do not merely echo, paraphrase, or repeat it."
         )
