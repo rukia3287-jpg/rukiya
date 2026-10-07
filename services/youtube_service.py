@@ -173,8 +173,11 @@ class YouTubeService:
             # Let ChatMonitor inspect quotaExceeded and stop without retrying.
             raise
         except Exception as e:
+            # Let ChatMonitor apply its exponential retry/backoff policy.
+            # Returning {} would falsely look like an empty successful poll and
+            # silently suppress recovery from transient network/API failures.
             logger.error(f"Failed to get chat messages: {e}")
-            return {}
+            raise
 
     def send_message(self, live_chat_id: str, message: str, *, message_kind: str = "reply") -> bool:
         """Blocking call to send a message; run via thread in async context."""
