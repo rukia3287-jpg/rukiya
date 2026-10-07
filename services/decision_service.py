@@ -255,9 +255,34 @@ class DecisionService:
 
         # 2. Check triggers & direct mentions
         has_trigger, matched_trigger = self.contains_trigger(message.text)
+        # A configured trigger (e.g. "rukiya") is a direct call. Discord mentions
+        # are resolved from raw_event/mention_ids when available. Do not compare
+        # a channel_id to a user mention; those are different snowflakes.
+        bot_user_id = None
+        raw_event = getattr(message, "raw_event", None)
+        if raw_event is not None:
+            bot_user_id = getattr(getattr(raw_event, "author", None), "id", None)
+
+        mention_ids = set()
+        if isinstance(raw_event, dict):
+            for key in ("mention_ids", "mentioned_user_ids"):
+                values = raw_event.get(key)
+                if values:
+                    mention_ids.update(str(v) for v in values)
+
+        is_discord_bot_mention = bool(
+            message.platform == "discord"
+            and bot_user_id is not None
+            and (
+                str(bot_user_id) in mention_ids
+                or f"<@{bot_user_id}>" in message.text
+                or f"<@!{bot_user_id}>" in message.text
+            )
+        )
+
         is_direct_mention = bool(
             has_trigger or
-            (message.channel_id and f"<@{message.channel_id}>" in message.text) or
+            is_discord_bot_mention or
             bypass_trigger
         )
 
