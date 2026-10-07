@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from services.ai_engine.errors import ErrorCategory, ProviderError, classify_provider_error
 from services.ai_engine.models import AIProviderResult
 from services.ai_engine.providers.base import AIProvider
 from services.config import Config
@@ -85,6 +86,9 @@ class OpenRouterProvider(AIProvider):
                     resp = await client.post(self.endpoint, json=payload, headers=headers)
                 except httpx.RequestError as e:
                     logger.warning("OpenRouter network error (attempt %d): %s", attempt, e)
+                    err = classify_provider_error(
+                        e, provider=self.name, capability="generation"
+                    )
                     if attempt < 3:
                         await asyncio.sleep(2 ** (attempt - 1))
                         continue
@@ -93,11 +97,41 @@ class OpenRouterProvider(AIProvider):
                         text="",
                         provider=self.name,
                         latency_ms=latency_ms,
-                        error=f"Network error: {str(e)}"
+                        error=str(err),
+                        error_category=err.category,
+                        status_code=err.status_code,
+                        error_details=err
                     )
 
-                if resp.status_code in (429, 503):
-                    logger.warning("OpenRouter rate-limited (%d). Attempt %d/3", resp.status_code, attempt)
+                if resp.status_code == 429:
+                    # Rate limits should fail fast so we do not hammer an already
+                    # constrained provider with three immediate retries.
+                    err = classify_provider_error(
+                        "OpenRouter HTTP 429 rate limited",
+                        status_code=429,
+                        provider=self.name,
+                        capability="generation"
+                    )
+                    logger.warning("OpenRouter rate-limited (429); failing fast")
+                    latency_ms = (time.time() - start_time) * 1000.0
+                    return AIProviderResult(
+                        text="",
+                        provider=self.name,
+                        latency_ms=latency_ms,
+                        error=str(err),
+                        error_category=err.category,
+                        status_code=err.status_code,
+                        error_details=err
+                    )
+
+                if resp.status_code == 503:
+                    err = classify_provider_error(
+                        f"OpenRouter HTTP {resp.status_code}: {resp.text[:200]}",
+                        status_code=resp.status_code,
+                        provider=self.name,
+                        capability="generation"
+                    )
+                    logger.warning("OpenRouter server error (attempt %d/3)", attempt)
                     if attempt < 3:
                         await asyncio.sleep(2 ** (attempt - 1))
                         continue
@@ -106,27 +140,47 @@ class OpenRouterProvider(AIProvider):
                         text="",
                         provider=self.name,
                         latency_ms=latency_ms,
-                        error=f"Rate limited: {resp.status_code}"
+                        error=str(err),
+                        error_category=err.category,
+                        status_code=err.status_code,
+                        error_details=err
                     )
 
                 if resp.status_code >= 400:
+                    err = classify_provider_error(
+                        f"OpenRouter HTTP {resp.status_code}: {resp.text[:200]}",
+                        status_code=resp.status_code,
+                        provider=self.name,
+                        capability="generation"
+                    )
                     latency_ms = (time.time() - start_time) * 1000.0
                     return AIProviderResult(
                         text="",
                         provider=self.name,
                         latency_ms=latency_ms,
-                        error=f"HTTP {resp.status_code}: {resp.text[:200]}"
+                        error=str(err),
+                        error_category=err.category,
+                        status_code=err.status_code,
+                        error_details=err
                     )
 
                 try:
                     data = resp.json()
                 except Exception as e:
                     latency_ms = (time.time() - start_time) * 1000.0
+                    err = ProviderError(
+                        provider=self.name,
+                        capability="generation",
+                        category=ErrorCategory.INVALID_RESPONSE,
+                        message=f"Invalid JSON: {e}",
+                    )
                     return AIProviderResult(
                         text="",
                         provider=self.name,
                         latency_ms=latency_ms,
-                        error=f"Invalid JSON: {str(e)}"
+                        error=str(err),
+                        error_category=err.category,
+                        error_details=err
                     )
 
                 choices = data.get("choices") or []
@@ -159,6 +213,13 @@ class OpenRouterProvider(AIProvider):
                     provider=self.name,
                     latency_ms=latency_ms,
                     error="Empty response from OpenRouter",
+                    error_category=ErrorCategory.INVALID_RESPONSE,
+                    error_details=ProviderError(
+                        provider=self.name,
+                        capability="generation",
+                        category=ErrorCategory.INVALID_RESPONSE,
+                        message="Empty response from OpenRouter",
+                    ),
                     raw_response=data
                 )
         finally:
