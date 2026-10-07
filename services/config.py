@@ -156,6 +156,9 @@ class Config:
             self.processed_messages_max = int(os.getenv("PROCESSED_MESSAGES_MAX", str(self.processed_messages_max)))
             self.rate_limit_global_capacity = int(os.getenv("RATE_LIMIT_GLOBAL_CAPACITY", str(self.rate_limit_global_capacity)))
             self.rate_limit_user_capacity = int(os.getenv("RATE_LIMIT_USER_CAPACITY", str(self.rate_limit_user_capacity)))
+            self.rate_limit_idle_capacity = int(os.getenv("RATE_LIMIT_IDLE_CAPACITY", str(self.rate_limit_idle_capacity)))
+            self.rate_limit_discord_capacity = int(os.getenv("RATE_LIMIT_DISCORD_CAPACITY", str(self.rate_limit_discord_capacity)))
+            self.chat_check_interval = int(os.getenv("CHAT_CHECK_INTERVAL", str(self.chat_check_interval)))
             self.gemini_search_daily_limit = int(os.getenv("GEMINI_SEARCH_DAILY_LIMIT", str(self.gemini_search_daily_limit)))
             self.gemini_search_cache_ttl = int(os.getenv("GEMINI_SEARCH_CACHE_TTL", str(self.gemini_search_cache_ttl)))
             self.ai_max_repair_attempts = int(os.getenv("AI_MAX_REPAIR_ATTEMPTS", str(self.ai_max_repair_attempts)))
@@ -183,6 +186,7 @@ class Config:
             self.search_timeout = float(os.getenv("SEARCH_TIMEOUT", str(self.search_timeout)))
             self.critic_timeout = float(os.getenv("CRITIC_TIMEOUT", str(self.critic_timeout)))
             self.repair_timeout = float(os.getenv("REPAIR_TIMEOUT", str(self.repair_timeout)))
+            self.send_cooldown = float(os.getenv("SEND_COOLDOWN", str(self.send_cooldown)))
         except ValueError:
             pass
 
