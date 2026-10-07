@@ -15,7 +15,7 @@ load_dotenv()
 from services.config import Config
 from services.ai_engine.providers.gemini import GeminiProvider
 from services.ai_engine.providers.openrouter import OpenRouterProvider
-from services.ai_engine.errors import classify_provider_error
+from services.ai_engine.errors import ErrorCategory, classify_provider_error
 
 
 async def main():
@@ -32,8 +32,7 @@ async def main():
         print("  -> SKIPPED (OPENROUTER_API_KEY not configured in environment)")
         or_status = "NOT_CONFIGURED"
     else:
-        masked = or_key[:4] + "..." + or_key[-4:] if len(or_key) > 8 else "***"
-        print(f"  -> Key detected: {masked} | Model: {config.openrouter_model}")
+        print(f"  -> Key detected: yes | Model: {config.openrouter_model}")
         or_provider = OpenRouterProvider(config)
         messages = [
             {"role": "system", "content": "You are Rukiya. Answer in one short sentence."},
@@ -55,8 +54,7 @@ async def main():
         gem_gen_status = "NOT_CONFIGURED"
         gem_search_status = "NOT_CONFIGURED"
     else:
-        masked = gem_key[:4] + "..." + gem_key[-4:] if len(gem_key) > 8 else "***"
-        print(f"  -> Key detected: {masked} | Model: {config.gemini_model}")
+        print(f"  -> Key detected: yes | Model: {config.gemini_model}")
         gem_provider = GeminiProvider(config)
 
         gen_msgs = [
