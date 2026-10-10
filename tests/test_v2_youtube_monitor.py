@@ -1,4 +1,7 @@
 import asyncio
+import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -110,7 +113,11 @@ class TestYouTubeMonitorV2(unittest.IsolatedAsyncioTestCase):
     async def test_youtube_viewers_are_keyed_by_channel_id_not_display_name(self):
         engine = MagicMock()
         engine.process = AsyncMock(return_value=AIEngineResult(text="Tch, chat.", provider="openrouter"))
-        orchestrator = RukiyaOrchestrator(config=self.config, memory_service=self.memory, ai_engine=engine)
+        # A real database file (":memory:" is a new empty database on every connection).
+        db_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, db_dir, True)
+        memory = MemoryService(Config(db_path=os.path.join(db_dir, "yt_identity.db")))
+        orchestrator = RukiyaOrchestrator(config=self.config, memory_service=memory, ai_engine=engine)
         resolved = []
         real_resolve = orchestrator.identity_service.resolve
 

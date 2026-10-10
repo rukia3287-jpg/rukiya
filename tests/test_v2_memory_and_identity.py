@@ -1,7 +1,9 @@
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import MagicMock, patch
 from services.config import Config
 from services.models import ChatMessage
 from services.identity_service import IdentityService
@@ -272,6 +274,70 @@ class TestIdentityLinkPersistence(unittest.TestCase):
         self.identity.unlink_identity(YOUTUBE_A)
         resolved = self.identity.resolve(_yt_message(YOUTUBE_A_RAW))
         self.assertEqual([m.key for m in self.memory.get_all_user_memories(resolved.canonical_id)], ["favorite_game"])
+
+    def test_username_fallback_key_never_follows_a_link(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        # No channel ID: a viewer whose *name* equals a linked channel ID must not inherit the link.
+        impostor = ChatMessage(
+            platform="youtube", message_id="m_imp", user_id=None,
+            username=YOUTUBE_A_RAW, display_name=YOUTUBE_A_RAW, text="hi",
+        )
+        self.assertEqual(self.identity.resolve(impostor).canonical_id, YOUTUBE_A)
+
+    def test_first_message_through_a_link_creates_the_primary_profile_correctly(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+
+        user = self.identity.resolve(_yt_message(YOUTUBE_A_RAW, display_name="YtName"))
+
+        self.assertEqual(user.canonical_id, DISCORD_A)
+        self.assertEqual((user.platform, user.user_id), ("discord", DISCORD_A.split(":", 1)[1]))
+        stored = self.memory.get_user(DISCORD_A)
+        self.assertEqual((stored.platform, stored.user_id), ("discord", DISCORD_A.split(":", 1)[1]))
+
+    def test_failed_unlink_takes_effect_now_and_can_be_retried(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        with patch.object(self.memory, "delete_identity_link", return_value=False):
+            self.assertFalse(self.identity.unlink_identity(YOUTUBE_A))
+        # Revocation applies in-process immediately...
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+        # ...and the stored row can still be removed by retrying.
+        self.assertTrue(self.identity.unlink_identity(YOUTUBE_A))
+        self.assertEqual(self._fresh_identity().resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+
+    def test_conflicting_link_written_by_another_process_is_adopted_not_overwritten(self):
+        other_process = self._fresh_identity()
+        other_process.link_identities(DISCORD_B, YOUTUBE_A)
+
+        with self.assertRaises(ValueError):
+            self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+
+        self.assertEqual(self.memory.load_identity_links(), {YOUTUBE_A: DISCORD_B})
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_B)
+
+    def test_database_error_during_link_is_reported_as_not_persisted(self):
+        broken = MagicMock()
+        broken.__enter__ = MagicMock(side_effect=sqlite3.OperationalError("disk I/O error"))
+        broken.execute.side_effect = sqlite3.OperationalError("disk I/O error")
+        with patch.object(self.memory, "_get_connection", return_value=broken):
+            self.assertFalse(self.identity.link_identities(DISCORD_A, YOUTUBE_A))
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_A)
+        self.assertEqual(self._fresh_identity().resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+
+    def test_invalid_stored_links_are_ignored_on_load(self):
+        conn = sqlite3.connect(self.db_path)
+        with conn:
+            conn.execute(
+                "INSERT INTO identity_links (secondary_id, primary_id, created_at) VALUES (?, ?, ?)",
+                ("youtube:Alex", DISCORD_A, 0.0),
+            )
+        conn.close()
+
+        restarted = self._fresh_identity()
+        self.assertEqual(restarted.resolve(_yt_message("Alex")).canonical_id, "youtube:Alex")
+
+    def test_non_ascii_digits_are_not_valid_discord_ids(self):
+        with self.assertRaises(ValueError):
+            self.identity.link_identities("discord:" + "１" * 18, YOUTUBE_A)  # full-width digits
 
 
 class TestMemoryService(unittest.TestCase):

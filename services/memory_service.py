@@ -314,7 +314,7 @@ class MemoryService:
         self._in_memory_identity_links[secondary_id] = primary_id
         conn = self._get_connection()
         if not conn:
-            logger.warning("Identity link %s -> %s held in memory only; database unavailable", secondary_id, primary_id)
+            logger.warning("Identity link held in memory only; database unavailable")
             return False
         try:
             with conn:
@@ -343,7 +343,7 @@ class MemoryService:
         self._in_memory_identity_links.pop(secondary_id, None)
         conn = self._get_connection()
         if not conn:
-            logger.warning("Identity link removal for %s held in memory only; database unavailable", secondary_id)
+            logger.warning("Identity link removal held in memory only; database unavailable")
             return False
         try:
             with conn:
