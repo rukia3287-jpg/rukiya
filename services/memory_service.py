@@ -27,7 +27,12 @@ logger = logging.getLogger(__name__)
 class MemoryService:
     """Manages stream and persistent user memories with SQLite and resilient fallback."""
 
-    def __init__(self, config: Optional[Config] = None):
+    # While in fallback, SQLite is retried at most this often. On recovery, users, user
+    # facts and identity links saved during the outage are written back. Stream-scoped
+    # data (sessions, stream facts, recent messages) stays in memory until the stream ends.
+    DB_RETRY_SECONDS = 30.0
+
+    def __init__(self, config: Optional[Config] = None, clock=None):
         self.config = config or Config()
         self.db_path = getattr(self.config, "db_path", "rukiya_memory.db")
         self.decay_constant = float(getattr(self.config, "memory_decay_days", 30.0))
@@ -35,7 +40,9 @@ class MemoryService:
         self.max_stream_memory = int(getattr(self.config, "max_stream_memory", 20))
         self.max_context_messages = int(getattr(self.config, "max_context_messages", 8))
 
-        self.fallback_mode = False
+        self._clock = clock or time.monotonic  # injectable for tests
+        self._fallback_mode = False
+        self._fallback_since = 0.0
         self._in_memory_users: Dict[str, UserIdentity] = {}
         self._in_memory_memories: Dict[str, Dict[str, MemoryEntry]] = {}  # canonical_id -> {key: MemoryEntry}
         self._in_memory_sessions: Dict[str, StreamSession] = {}  # session_id -> StreamSession
@@ -46,9 +53,77 @@ class MemoryService:
         self.active_session_id: Optional[str] = None
         self._init_db()
 
+    @property
+    def fallback_mode(self) -> bool:
+        return self._fallback_mode
+
+    @fallback_mode.setter
+    def fallback_mode(self, value: bool) -> None:
+        if value and not self._fallback_mode:
+            self._fallback_since = self._clock()
+            logger.warning("MemoryService using in-memory fallback; SQLite retry in %.0fs", self.DB_RETRY_SECONDS)
+        self._fallback_mode = bool(value)
+
     def _get_connection(self) -> Optional[sqlite3.Connection]:
-        if self.fallback_mode:
+        if self._fallback_mode and not self._try_recover():
             return None
+        return self._open_connection()
+
+    def _try_recover(self) -> bool:
+        """Retry SQLite once the retry interval has passed; on success write back fallback state."""
+        if self._clock() - self._fallback_since < self.DB_RETRY_SECONDS:
+            return False
+        self._fallback_since = self._clock()  # a failed attempt waits a full interval again
+        self._fallback_mode = False
+        self._init_db()  # recreates any missing tables; re-enters fallback on failure
+        if self._fallback_mode or not self._write_back_fallback_state():
+            self._fallback_since = self._clock()
+            logger.warning("SQLite still unavailable; staying in in-memory fallback")
+            return False
+        logger.warning("MemoryService recovered SQLite persistence and wrote back in-memory state")
+        return True
+
+    def _write_back_fallback_state(self) -> bool:
+        conn = self._open_connection()
+        if not conn:
+            return False
+        try:
+            with conn:
+                for user in list(self._in_memory_users.values()):
+                    self._upsert_user(conn, user)
+                for canonical_id, entries in list(self._in_memory_memories.items()):
+                    for entry in list(entries.values()):
+                        # Never replace a row that is newer than the cached copy.
+                        conn.execute("""
+                            INSERT INTO memories (canonical_id, key, value, confidence, source, created_at, updated_at, last_used_at, usage_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(canonical_id, key) DO UPDATE SET
+                                value=excluded.value,
+                                confidence=excluded.confidence,
+                                source=excluded.source,
+                                updated_at=excluded.updated_at,
+                                last_used_at=excluded.last_used_at,
+                                usage_count=excluded.usage_count
+                            WHERE excluded.updated_at > memories.updated_at
+                        """, (
+                            canonical_id, entry.key, entry.value, entry.confidence, entry.source,
+                            entry.created_at, entry.updated_at, entry.last_used_at, entry.usage_count
+                        ))
+                for secondary_id, primary_id in list(self._in_memory_identity_links.items()):
+                    conn.execute(
+                        "INSERT INTO identity_links (secondary_id, primary_id, created_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(secondary_id) DO NOTHING",
+                        (secondary_id, primary_id, time.time()),
+                    )
+            return True
+        except Exception as e:
+            logger.error("Error writing back in-memory state to DB: %s", e)
+            self.fallback_mode = True
+            return False
+        finally:
+            conn.close()
+
+    def _open_connection(self) -> Optional[sqlite3.Connection]:
         try:
             conn = sqlite3.connect(self.db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
@@ -165,10 +240,6 @@ class MemoryService:
         )
         self.active_session_id = sid
 
-        if self.fallback_mode:
-            self._in_memory_sessions[sid] = session
-            return session
-
         conn = self._get_connection()
         if conn:
             try:
@@ -226,9 +297,6 @@ class MemoryService:
     # User Profile Operations
     # ─────────────────────────────────────────────────────────────
     def get_user(self, canonical_id: str) -> Optional[UserIdentity]:
-        if self.fallback_mode:
-            return self._in_memory_users.get(canonical_id)
-
         conn = self._get_connection()
         if not conn:
             return self._in_memory_users.get(canonical_id)
@@ -259,29 +327,33 @@ class MemoryService:
         finally:
             conn.close()
 
+    @staticmethod
+    def _upsert_user(conn: sqlite3.Connection, user: UserIdentity) -> None:
+        meta = dict(user.metadata)
+        meta["welcomed_in_stream"] = user.is_welcomed_in_stream
+        conn.execute("""
+            INSERT INTO users (canonical_id, platform, user_id, username, display_name, first_seen, last_seen, interaction_count, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(canonical_id) DO UPDATE SET
+                username=excluded.username,
+                display_name=excluded.display_name,
+                last_seen=excluded.last_seen,
+                interaction_count=excluded.interaction_count,
+                metadata=excluded.metadata
+        """, (
+            user.canonical_id, user.platform, user.user_id, user.username,
+            user.display_name, user.first_seen, user.last_seen,
+            user.interaction_count, json.dumps(meta)
+        ))
+
     def save_user(self, user: UserIdentity) -> None:
         self._in_memory_users[user.canonical_id] = user
         conn = self._get_connection()
         if not conn:
             return
         try:
-            meta = dict(user.metadata)
-            meta["welcomed_in_stream"] = user.is_welcomed_in_stream
             with conn:
-                conn.execute("""
-                    INSERT INTO users (canonical_id, platform, user_id, username, display_name, first_seen, last_seen, interaction_count, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(canonical_id) DO UPDATE SET
-                        username=excluded.username,
-                        display_name=excluded.display_name,
-                        last_seen=excluded.last_seen,
-                        interaction_count=excluded.interaction_count,
-                        metadata=excluded.metadata
-                """, (
-                    user.canonical_id, user.platform, user.user_id, user.username,
-                    user.display_name, user.first_seen, user.last_seen,
-                    user.interaction_count, json.dumps(meta)
-                ))
+                self._upsert_user(conn, user)
         except Exception as e:
             logger.error("Error saving user to DB: %s", e)
             self.fallback_mode = True
