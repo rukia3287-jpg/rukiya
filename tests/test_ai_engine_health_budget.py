@@ -110,9 +110,10 @@ class TestAIEngineHealthAndBudget(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget.get_remaining_searches(), 3)
         self.assertTrue(budget.can_search("user_a"))
 
-        # User A makes 2 searches
-        budget.record_search("user_a")
-        budget.record_search("user_a")
+        # User A makes 2 search requests (one user unit + one search slot each)
+        for _ in range(2):
+            self.assertTrue(budget.try_reserve_user_request("user_a"))
+            self.assertTrue(budget.try_reserve_search())
         self.assertEqual(budget.get_remaining_searches(), 1)
 
         # User A reaches user limit
@@ -121,9 +122,11 @@ class TestAIEngineHealthAndBudget(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(budget.can_search("user_b"))
 
         # User B makes 1 search -> global limit reached (3/3)
-        budget.record_search("user_b")
+        self.assertTrue(budget.try_reserve_user_request("user_b"))
+        self.assertTrue(budget.try_reserve_search())
         self.assertEqual(budget.get_remaining_searches(), 0)
         self.assertFalse(budget.can_search("user_b"))
+        self.assertFalse(budget.try_reserve_search())
 
 
 if __name__ == "__main__":

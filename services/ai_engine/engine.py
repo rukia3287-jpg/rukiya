@@ -29,6 +29,7 @@ from services.ai_engine.models import (
 )
 from services.ai_engine.planner import Planner
 from services.ai_engine.provider_registry import ProviderRegistry
+from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
@@ -88,6 +89,31 @@ class AIEngine:
         gemini = self.registry.get("gemini")
         if gemini and hasattr(gemini, "set_health_tracker"):
             gemini.set_health_tracker(self.health_tracker)
+
+    async def _generate(self, provider: AIProvider, messages: List[dict], *, track_health: bool = True) -> AIProviderResult:
+        """Dispatch one generation call (primary, backup or repair).
+
+        Every dispatch counts toward the global daily cap, whether it succeeds or not.
+        Over the cap the call is refused without dispatch and without touching provider
+        health, since the provider did nothing wrong.
+        """
+        name = provider.name
+        if not self.budget_manager.try_reserve_generation(name):
+            return AIProviderResult(
+                text="",
+                provider=name,
+                error="Daily AI generation budget exhausted",
+                error_details=ProviderError(
+                    provider=name,
+                    capability="generation",
+                    category=ErrorCategory.QUOTA_EXHAUSTED,
+                    retryable=False
+                )
+            )
+        res = await self.executor.execute_generate(provider, messages)
+        if track_health:
+            self.health_tracker.record_call(f"{name}:generation", not bool(res.error), res.latency_ms, error=res.error_details)
+        return res
 
     def get_fallback(self, intent: Optional[str] = None) -> str:
         if intent == "greeting":
@@ -164,6 +190,23 @@ class AIEngine:
 
         # 4. In-flight request deduplication
         async def _fetch() -> SearchResult:
+            # Reserve the search slot right before dispatch (no await in between), so
+            # concurrent requests cannot overshoot the daily cap. Failed searches still count.
+            if not self.budget_manager.try_reserve_search():
+                return SearchResult(
+                    query=query,
+                    text="",
+                    sources=[],
+                    citations=[],
+                    success=False,
+                    error="Daily search budget exhausted",
+                    error_details=ProviderError(
+                        provider="gemini",
+                        capability="search",
+                        category=ErrorCategory.QUOTA_EXHAUSTED,
+                        retryable=False
+                    )
+                )
             res = await self.executor.execute_search(gemini, query=query, request_id=request_id)
             err_details = getattr(res, "error_details", None)
             if res.error and not err_details:
@@ -201,8 +244,6 @@ class AIEngine:
                 error=None,
                 error_details=None
             )
-            # Record in budget & positive cache
-            self.budget_manager.record_search()
             self.cache.set(query, sr, category=category, time_scope=time_scope)
             return sr
 
@@ -224,6 +265,15 @@ class AIEngine:
             self.budget_manager,
             registry=self.registry,
         )
+
+        # Reserve the user's unit in the same synchronous step as the routing check, so
+        # concurrent requests from one user cannot all pass the check before one is charged.
+        user_reserved = False
+        if route != RouteType.STATIC_FALLBACK:
+            if self.budget_manager.try_reserve_user_request(request.user_id):
+                user_reserved = bool(request.user_id)
+            else:
+                route = RouteType.STATIC_FALLBACK
 
         logger.info(
             "event=ai_engine_route req_id=%s route=%s intent=%s complexity=%.2f search_req=%s",
@@ -264,20 +314,17 @@ class AIEngine:
                 provider_used = "openrouter"
                 final_provider = "openrouter"
                 messages = self.compiler.compile(request, plan)
-                res = await self.executor.execute_generate(openrouter, messages)  # type: ignore
-                self.health_tracker.record_call("openrouter:generation", not bool(res.error), res.latency_ms, error=res.error_details)
+                res = await self._generate(openrouter, messages)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
-                    self.budget_manager.record_generation("openrouter")
                 else:
                     # Automatic BACKUP to Gemini
                     logger.warning("OpenRouter failed; triggering BACKUP route to Gemini.")
                     fallback_used = True
                     fallback_reason = "openrouter_failed"
                     if gemini and self.health_tracker.is_available("gemini:generation"):
-                        b_res = await self.executor.execute_generate(gemini, messages)
-                        self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
+                        b_res = await self._generate(gemini, messages)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                             provider_used = "gemini_backup"
@@ -285,7 +332,6 @@ class AIEngine:
                             executed_route = "backup"
                             fallback_used = False
                             fallback_reason = None
-                            self.budget_manager.record_generation("gemini")
                         else:
                             candidate_text = self.get_fallback(plan.intent)
                             provider_used = "static_fallback"
@@ -301,12 +347,10 @@ class AIEngine:
                 provider_used = "gemini"
                 final_provider = "gemini"
                 messages = self.compiler.compile(request, plan)
-                res = await self.executor.execute_generate(gemini, messages)  # type: ignore
-                self.health_tracker.record_call("gemini:generation", not bool(res.error), res.latency_ms, error=res.error_details)
+                res = await self._generate(gemini, messages)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
-                    self.budget_manager.record_generation("gemini")
                 else:
                     candidate_text = self.get_fallback(plan.intent)
                     provider_used = "static_fallback"
@@ -359,11 +403,9 @@ class AIEngine:
                             search_succeeded=True,
                             verified_current_information=True
                         )
-                        gen_res = await self.executor.execute_generate(openrouter, hybrid_messages)
-                        self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
+                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
-                            self.budget_manager.record_generation("openrouter")
                         elif sr.text.strip():
                             candidate_text = sr.text.strip()
                             provider_used = "gemini_search"
@@ -402,19 +444,15 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        gen_res = await self.executor.execute_generate(openrouter, hybrid_messages)
-                        self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
+                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
-                            self.budget_manager.record_generation("openrouter")
                         elif gemini and self.health_tracker.is_available("gemini:generation"):
-                            b_res = await self.executor.execute_generate(gemini, hybrid_messages)
-                            self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
+                            b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
                             if b_res.text and not b_res.error:
                                 candidate_text = b_res.text
                                 provider_used = "degraded_hybrid (gemini)"
                                 final_provider = "gemini"
-                                self.budget_manager.record_generation("gemini")
                             else:
                                 candidate_text = self.get_fallback("search_unavailable")
                                 provider_used = "static_fallback"
@@ -435,11 +473,9 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        b_res = await self.executor.execute_generate(gemini, hybrid_messages)
-                        self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
+                        b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
-                            self.budget_manager.record_generation("gemini")
                         else:
                             candidate_text = self.get_fallback("search_unavailable")
                             provider_used = "static_fallback"
@@ -460,8 +496,8 @@ class AIEngine:
 
         # One logical request costs one unit of the user's daily AI budget, however many
         # provider operations (search + synthesis, backup) served it. Static fallbacks are free.
-        if final_provider not in ("none", "static_fallback"):
-            self.budget_manager.record_user_request(request.user_id)
+        if user_reserved and final_provider in ("none", "static_fallback"):
+            self.budget_manager.refund_user_request(request.user_id)
 
         # 4. Self-Critic & Repair Loop
         if candidate_text and final_provider != "static_fallback":
@@ -479,7 +515,7 @@ class AIEngine:
                 # Generator lambda for repair
                 async def _repair_gen(msgs: List[dict]) -> AIProviderResult:
                     target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
-                    return await self.executor.execute_generate(target_prov, msgs)  # type: ignore
+                    return await self._generate(target_prov, msgs, track_health=False)  # type: ignore[arg-type]
 
                 repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
                     initial_text=candidate_text,

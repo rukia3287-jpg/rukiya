@@ -1,5 +1,21 @@
 """services/ai_engine/budget.py
 Budget manager tracking global and per-user limits, with daily search safety caps.
+
+Accounting policy (all counters reset together at the UTC day boundary):
+
+- search_count: grounded searches dispatched to Gemini, successful or not, because
+  failed calls still consume provider quota. Positive-cache hits, in-flight
+  deduplication joins and negative-cache hits are free. Capped by daily_search_limit.
+- openrouter_count / gemini_count: provider operations dispatched (generations,
+  including backups and repair calls, successful or not; gemini_count also includes
+  searches). Their sum is capped by global_daily_limit.
+- user_counts: logical AI requests per user. One AIEngine.process() call costs one
+  unit, however many provider operations it needed, and only if a provider served it
+  (unserved requests are refunded). Capped by user_daily_limit.
+
+Every cap uses try_reserve_*(), which checks and increments in one synchronous step.
+The engine calls them with no await between the check and the dispatch, so concurrent
+asyncio requests cannot all pass a check before any of them is counted.
 """
 from __future__ import annotations
 
@@ -34,6 +50,7 @@ class BudgetManager:
         self.search_count: int = 0
         self.openrouter_count: int = 0
         self.gemini_count: int = 0
+        # Bounded by the number of distinct users seen today; cleared at rollover.
         self.user_counts: Dict[str, int] = {}
         self.current_date: str = self._get_today()
 
@@ -93,32 +110,48 @@ class BudgetManager:
 
         return True
 
-    def record_search(self, user_id: Optional[str] = None) -> None:
+    def try_reserve_search(self) -> bool:
+        """Count one grounded search about to be dispatched; False if the daily cap is reached."""
         self._check_rollover()
+        if self.search_count >= self.daily_search_limit:
+            logger.warning("Gemini search daily limit reached: %d/%d", self.search_count, self.daily_search_limit)
+            return False
         self.search_count += 1
         self.gemini_count += 1
-        if user_id:
-            self.user_counts[user_id] = self.user_counts.get(user_id, 0) + 1
+        return True
 
-    def record_generation(self, provider: str, user_id: Optional[str] = None) -> None:
+    def try_reserve_generation(self, provider: str) -> bool:
+        """Count one generation about to be dispatched; False if the global daily cap is reached."""
         self._check_rollover()
+        if self.openrouter_count + self.gemini_count >= self.global_daily_limit:
+            logger.warning("Global daily AI limit reached: %d", self.global_daily_limit)
+            return False
         if provider == "openrouter":
             self.openrouter_count += 1
         elif provider == "gemini":
             self.gemini_count += 1
+        return True
 
-        if user_id:
-            self.user_counts[user_id] = self.user_counts.get(user_id, 0) + 1
+    def try_reserve_user_request(self, user_id: Optional[str]) -> bool:
+        """Charge one unit of the user's daily budget; False if the user's cap is reached.
 
-    def record_user_request(self, user_id: Optional[str]) -> None:
-        """Charge one unit of the user's daily AI budget for one logical request.
-
-        The engine calls this once per request served by a provider, however many
-        provider operations (search, synthesis, backup) that request needed.
+        Requests without a user ID are not user-limited (global caps still apply).
         """
         self._check_rollover()
-        if user_id:
-            self.user_counts[user_id] = self.user_counts.get(user_id, 0) + 1
+        if not user_id:
+            return True
+        count = self.user_counts.get(user_id, 0)
+        if count >= self.user_daily_limit:
+            logger.warning("User %s daily AI budget exhausted: %d", user_id, count)
+            return False
+        self.user_counts[user_id] = count + 1
+        return True
+
+    def refund_user_request(self, user_id: Optional[str]) -> None:
+        """Return a unit reserved for a request that no provider ended up serving."""
+        self._check_rollover()
+        if user_id and self.user_counts.get(user_id, 0) > 0:
+            self.user_counts[user_id] -= 1
 
     def get_remaining_searches(self) -> int:
         self._check_rollover()
