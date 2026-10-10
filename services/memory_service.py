@@ -41,6 +41,7 @@ class MemoryService:
         self._in_memory_sessions: Dict[str, StreamSession] = {}  # session_id -> StreamSession
         self._in_memory_stream_memory: Dict[str, Dict[str, MemoryEntry]] = {}  # session_id:canonical_id -> {key: MemoryEntry}
         self._in_memory_recent_messages: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of message dicts
+        self._in_memory_identity_links: Dict[str, str] = {}  # secondary canonical_id -> primary canonical_id
 
         self.active_session_id: Optional[str] = None
         self._init_db()
@@ -128,8 +129,18 @@ class MemoryService:
                         timestamp REAL NOT NULL
                     )
                 """)
+                # Explicit, verified cross-platform identity links. Additive table, so
+                # existing databases pick it up on the next start without a migration step.
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS identity_links (
+                        secondary_id TEXT PRIMARY KEY,
+                        primary_id TEXT NOT NULL,
+                        created_at REAL NOT NULL
+                    )
+                """)
                 # Indexes
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_users_platform_user ON users(platform, user_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_identity_links_primary ON identity_links(primary_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_user_key ON memories(canonical_id, key)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_stream_memory_session ON stream_memory(session_id, expires_at)")
@@ -274,6 +285,73 @@ class MemoryService:
         except Exception as e:
             logger.error("Error saving user to DB: %s", e)
             self.fallback_mode = True
+        finally:
+            conn.close()
+
+    # ─────────────────────────────────────────────────────────────
+    # Identity Link Operations
+    # ─────────────────────────────────────────────────────────────
+    def load_identity_links(self) -> Dict[str, str]:
+        """Return every stored link as {secondary canonical_id: primary canonical_id}."""
+        conn = self._get_connection()
+        if not conn:
+            return dict(self._in_memory_identity_links)
+        try:
+            rows = conn.execute("SELECT secondary_id, primary_id FROM identity_links").fetchall()
+            return {row["secondary_id"]: row["primary_id"] for row in rows}
+        except Exception as e:
+            logger.error("Error loading identity links from DB: %s", e)
+            return dict(self._in_memory_identity_links)
+        finally:
+            conn.close()
+
+    def save_identity_link(self, secondary_id: str, primary_id: str) -> bool:
+        """Store a link. Returns True only if it was written to SQLite.
+
+        Raises ValueError if the database already links secondary_id to a different
+        primary (for example, written by another process since this one loaded).
+        """
+        self._in_memory_identity_links[secondary_id] = primary_id
+        conn = self._get_connection()
+        if not conn:
+            logger.warning("Identity link %s -> %s held in memory only; database unavailable", secondary_id, primary_id)
+            return False
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO identity_links (secondary_id, primary_id, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(secondary_id) DO NOTHING",
+                    (secondary_id, primary_id, time.time()),
+                )
+                row = conn.execute(
+                    "SELECT primary_id FROM identity_links WHERE secondary_id=?", (secondary_id,)
+                ).fetchone()
+            if row and row["primary_id"] != primary_id:
+                self._in_memory_identity_links[secondary_id] = row["primary_id"]
+                raise ValueError(f"{secondary_id} is already linked to {row['primary_id']}")
+            return True
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error("Error saving identity link to DB: %s", e)
+            return False
+        finally:
+            conn.close()
+
+    def delete_identity_link(self, secondary_id: str) -> bool:
+        """Remove a link. Returns True only if the removal was written to SQLite."""
+        self._in_memory_identity_links.pop(secondary_id, None)
+        conn = self._get_connection()
+        if not conn:
+            logger.warning("Identity link removal for %s held in memory only; database unavailable", secondary_id)
+            return False
+        try:
+            with conn:
+                conn.execute("DELETE FROM identity_links WHERE secondary_id=?", (secondary_id,))
+            return True
+        except Exception as e:
+            logger.error("Error deleting identity link from DB: %s", e)
+            return False
         finally:
             conn.close()
 

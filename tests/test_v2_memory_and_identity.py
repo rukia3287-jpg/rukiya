@@ -145,17 +145,133 @@ class TestIdentityService(unittest.TestCase):
         self.assertEqual([m["text"] for m in history], ["first", "reply one", "second", "reply two"])
 
     def test_explicit_link_identities(self):
-        self.identity.link_identities("discord:111", "youtube:UC_222")
-        msg = ChatMessage(
-            platform="youtube",
-            message_id="m3",
-            user_id="UC_222",
-            username="yt_user",
-            display_name="LinkedUser",
-            text="Linked"
-        )
-        resolved = self.identity.resolve(msg)
-        self.assertEqual(resolved.canonical_id, "discord:111")
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        resolved = self.identity.resolve(_yt_message(YOUTUBE_A_RAW))
+        self.assertEqual(resolved.canonical_id, DISCORD_A)
+
+
+DISCORD_A = "discord:123456789012345678"
+DISCORD_B = "discord:223456789012345678"
+YOUTUBE_A_RAW = "UCabcdefghijklmnopqrstuv"
+YOUTUBE_B_RAW = "UCbbcdefghijklmnopqrstuv"
+YOUTUBE_A = f"youtube:{YOUTUBE_A_RAW}"
+YOUTUBE_B = f"youtube:{YOUTUBE_B_RAW}"
+
+
+def _yt_message(channel_id, display_name="Viewer"):
+    return ChatMessage(
+        platform="youtube",
+        message_id=f"m_{channel_id}",
+        user_id=channel_id,
+        username=display_name,
+        display_name=display_name,
+        text="hello",
+    )
+
+
+class TestIdentityLinkPersistence(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test_links.db")
+        self.config = Config(db_path=self.db_path)
+        self.memory = MemoryService(self.config)
+        self.identity = IdentityService(self.memory)
+
+    def tearDown(self):
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(self.db_path + suffix)
+            except OSError:
+                pass
+
+    def _fresh_identity(self):
+        """A new process: fresh services against the same database file."""
+        return IdentityService(MemoryService(Config(db_path=self.db_path)))
+
+    def test_link_survives_restart(self):
+        self.assertTrue(self.identity.link_identities(DISCORD_A, YOUTUBE_A))
+
+        restarted = self._fresh_identity()
+        self.assertEqual(restarted.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_A)
+
+    def test_invalid_links_are_rejected(self):
+        invalid_pairs = [
+            (DISCORD_A, DISCORD_A),                # self link
+            (DISCORD_A, DISCORD_B),                # same platform
+            (DISCORD_A, "youtube:dn_viewer"),      # display-name fallback key
+            (DISCORD_A, "youtube:Viewer"),         # display name, not a channel ID
+            (DISCORD_A, "youtube:unknown"),
+            ("discord:not-a-snowflake", YOUTUBE_A),
+            ("twitch:123456789012345678", YOUTUBE_A),
+            ("", YOUTUBE_A),
+            (DISCORD_A, f"{YOUTUBE_A} "),
+        ]
+        for primary, secondary in invalid_pairs:
+            with self.subTest(primary=primary, secondary=secondary):
+                with self.assertRaises(ValueError):
+                    self.identity.link_identities(primary, secondary)
+        self.assertEqual(self.memory.load_identity_links(), {})
+
+    def test_conflicting_link_is_rejected_and_original_kept(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        with self.assertRaises(ValueError):
+            self.identity.link_identities(DISCORD_B, YOUTUBE_A)
+
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_A)
+        self.assertEqual(self._fresh_identity().resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_A)
+
+    def test_relinking_the_same_pair_is_idempotent(self):
+        self.assertTrue(self.identity.link_identities(DISCORD_A, YOUTUBE_A))
+        self.assertTrue(self.identity.link_identities(DISCORD_A, YOUTUBE_A))
+        self.assertEqual(self.memory.load_identity_links(), {YOUTUBE_A: DISCORD_A})
+
+    def test_chained_links_are_rejected(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        # A linked secondary cannot become a primary, and a primary cannot become a secondary.
+        with self.assertRaises(ValueError):
+            self.identity.link_identities(YOUTUBE_A, DISCORD_B)
+        with self.assertRaises(ValueError):
+            self.identity.link_identities(YOUTUBE_B, DISCORD_A)
+
+    def test_unlink_is_persisted(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        self.assertTrue(self.identity.unlink_identity(YOUTUBE_A))
+
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+        self.assertEqual(self._fresh_identity().resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+        with self.assertRaises(KeyError):
+            self.identity.unlink_identity(YOUTUBE_A)
+
+    def test_link_in_fallback_mode_is_reported_as_not_persisted(self):
+        self.memory.fallback_mode = True
+
+        self.assertFalse(self.identity.link_identities(DISCORD_A, YOUTUBE_A))
+        # Still effective for this process...
+        self.assertEqual(self.identity.resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, DISCORD_A)
+        # ...but never claimed to be durable.
+        self.assertEqual(self._fresh_identity().resolve(_yt_message(YOUTUBE_A_RAW)).canonical_id, YOUTUBE_A)
+
+    def test_link_does_not_join_viewers_who_share_a_display_name(self):
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+
+        linked = self.identity.resolve(_yt_message(YOUTUBE_A_RAW, display_name="Alex"))
+        namesake = self.identity.resolve(_yt_message(YOUTUBE_B_RAW, display_name="Alex"))
+
+        self.assertEqual(linked.canonical_id, DISCORD_A)
+        self.assertEqual(namesake.canonical_id, YOUTUBE_B)
+
+    def test_link_preserves_existing_memory_associations(self):
+        self.memory.set_user_memory(YOUTUBE_A, "favorite_game", "Genshin")
+        self.memory.set_user_memory(DISCORD_A, "preferred_name", "Ichigo")
+
+        self.identity.link_identities(DISCORD_A, YOUTUBE_A)
+        self.assertEqual([m.key for m in self.memory.get_all_user_memories(YOUTUBE_A)], ["favorite_game"])
+        self.assertEqual([m.key for m in self.memory.get_all_user_memories(DISCORD_A)], ["preferred_name"])
+
+        # Unlinking restores the YouTube identity with its own memories intact.
+        self.identity.unlink_identity(YOUTUBE_A)
+        resolved = self.identity.resolve(_yt_message(YOUTUBE_A_RAW))
+        self.assertEqual([m.key for m in self.memory.get_all_user_memories(resolved.canonical_id)], ["favorite_game"])
 
 
 class TestMemoryService(unittest.TestCase):
