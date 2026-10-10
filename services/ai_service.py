@@ -17,7 +17,13 @@ import httpx
 
 from services.config import Config
 from services.models import GeneratedResponse, MemoryEntry, ResponseDecision
-from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, validate_rukiya_response
+from services.language import detect_reply_language
+from services.safety_service import (
+    DEFAULT_VALIDATOR_FALLBACK,
+    SERIOUS_INTENT_INSTRUCTIONS,
+    localize_fallback,
+    validate_rukiya_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +298,11 @@ class AIService:
         if not raw:
             return None
 
-        validated = validate_rukiya_response(raw)
+        # A rejected reply returns None, so the orchestrator applies its own fallback in
+        # the viewer's language instead of an English default posing as a real reply.
+        validated = validate_rukiya_response(raw, fallback="")
+        if not validated:
+            return None
 
         # Enforce max length constraint
         if len(validated) > self.max_message_length:
@@ -362,7 +372,9 @@ class AIService:
             if not raw:
                 return None
 
-            raw = validate_rukiya_response(raw)
+            raw = validate_rukiya_response(
+                raw, fallback=localize_fallback(DEFAULT_VALIDATOR_FALLBACK, detect_reply_language(message))
+            )
             if not bypass_cooldown:
                 self.last_used = time.time()
 

@@ -2,6 +2,7 @@
 YouTube API failures are classified (transient vs permanent), logged with context but
 without message content, and permanent ones stop the monitor instead of looping.
 """
+import asyncio
 import json
 import unittest
 from unittest.mock import MagicMock
@@ -41,6 +42,16 @@ class ClassificationTests(unittest.TestCase):
                 err = classify_youtube_error(exc)
                 self.assertEqual((err.kind, err.retryable, err.stops_monitoring), (kind, retryable, stops))
 
+    def test_expired_or_revoked_token_is_a_permanent_auth_error(self):
+        try:
+            from google.auth.exceptions import RefreshError
+        except ImportError:
+            self.skipTest("google-auth not installed")
+        err = classify_youtube_error(RefreshError("invalid_grant: Token has been expired or revoked."))
+        self.assertEqual((err.kind, err.stops_monitoring), ("auth", True))
+        retryable = classify_youtube_error(RefreshError("temporary", retryable=True))
+        self.assertEqual((retryable.kind, retryable.stops_monitoring), ("transient", False))
+
     def test_real_http_error_type_is_understood(self):
         try:
             from googleapiclient.errors import HttpError
@@ -72,6 +83,8 @@ class SendMessageTests(unittest.TestCase):
             self.assertFalse(service.send_message("chat", "secret viewer detail in reply", message_kind="reply"))
 
         self.assertEqual(service.last_send_error.kind, "chat_ended")
+        sent, err = _service_raising(FakeApiError(429)).send_message_detailed("chat", "hi")
+        self.assertEqual((sent, err.kind), (False, "rate_limited"))
         joined = "\n".join(logs.output)
         self.assertIn("chat_ended", joined)
         self.assertNotIn("secret viewer detail", joined)
@@ -112,6 +125,68 @@ class MonitorReactionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(monitor.is_running)
         self.assertEqual(youtube.get_chat_messages.call_count, 1)
         self.assertEqual(monitor.get_status()["last_error"], "poll:chat_ended:liveChatEnded")
+
+    async def test_forbidden_send_keeps_monitoring_but_forbidden_poll_stops(self):
+        monitor = self._monitor(_service_raising(FakeApiError(403, "forbidden")))
+        self.assertFalse(await monitor.send_chat_message("hello"))
+        self.assertTrue(monitor.is_running)  # e.g. a temporary moderator timeout
+        monitor.stop_monitoring()
+
+        youtube = MagicMock()
+        youtube.get_chat_messages = MagicMock(side_effect=FakeApiError(403, "forbidden"))
+        polling = self._monitor(youtube)
+        await polling.process_messages()
+        self.assertFalse(polling.is_running)  # e.g. members-only chat: retrying cannot help
+
+    async def test_invalid_page_token_is_reset_before_retrying(self):
+        youtube = MagicMock()
+        youtube.get_chat_messages = MagicMock(side_effect=FakeApiError(400, "pageTokenInvalid"))
+        monitor = self._monitor(youtube)
+        monitor.next_page_token = "stale-token"
+
+        with self.assertRaises(FakeApiError):
+            await monitor.process_messages()
+        self.assertIsNone(monitor.next_page_token)
+        monitor.stop_monitoring()
+
+    async def test_last_error_reports_its_age(self):
+        monitor = self._monitor(_service_raising(TimeoutError("timed out")))
+        await monitor.send_chat_message("hello")
+        status = monitor.get_status()
+        self.assertIsNotNone(status["last_error_age_s"])
+        self.assertGreaterEqual(status["last_error_age_s"], 0)
+        monitor.stop_monitoring()
+
+    async def test_stop_from_inside_the_polling_task_ends_the_batch(self):
+        """A subscriber whose send hits an ended chat stops the real background task."""
+        youtube = _service_raising(FakeApiError(403, "liveChatEnded"))
+        youtube.get_chat_messages = MagicMock(return_value={
+            "pollingIntervalMillis": 10000,
+            "items": [
+                {"id": f"m{i}", "snippet": {"displayMessage": f"msg {i}"}, "authorDetails": {"displayName": "A"}}
+                for i in range(3)
+            ],
+        })
+        ai = MagicMock()
+        ai.get_cooldown_remaining = MagicMock(return_value=0)
+        monitor = ChatMonitor(youtube, ai, {"send_cooldown": 0, "idle_chat_enabled": False})
+        delivered = []
+
+        async def replying_subscriber(message, author):
+            delivered.append(message)
+            await monitor.send_chat_message(f"reply to {message}")
+
+        monitor.subscribe(replying_subscriber)
+        self.assertTrue(monitor.start_monitoring("live-chat"))
+        task = monitor._monitor_task
+        # stop_monitoring() ends the loop by cancelling its task, so wait rather than await it.
+        await asyncio.wait({task}, timeout=5)
+        self.assertTrue(task.done())
+
+        self.assertFalse(monitor.is_running)
+        self.assertEqual(delivered, ["msg 0"])
+        self.assertTrue(monitor.start_monitoring("next-chat", start_background=False))
+        monitor.stop_monitoring()
 
     async def test_transient_polling_error_is_raised_for_backoff(self):
         youtube = MagicMock()

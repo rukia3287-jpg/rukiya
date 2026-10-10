@@ -9,7 +9,7 @@ import random
 import time
 from typing import Any, Awaitable, Callable, Optional, Union
 
-from services.youtube_service import YouTubeApiError, classify_youtube_error
+from services.youtube_service import YouTubeApiError, YouTubeService, classify_youtube_error
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,7 @@ class ChatMonitor:
         self._last_activity_at = time.monotonic()
         self._last_idle_message_at = 0.0
         self.last_error: Optional[str] = None  # "<poll|send>:<kind>:<reason>", shown by /yt_status
+        self._last_error_at: Optional[float] = None
 
     def _cfg(self, key: str, default: Any = None) -> Any:
         if self.config is None:
@@ -161,10 +162,12 @@ class ChatMonitor:
             "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
             "subscribers_count": len(self.subscribers),
             "last_error": self.last_error,
+            "last_error_age_s": round(time.time() - self._last_error_at, 1) if self._last_error_at else None,
         }
 
     def _record_api_error(self, source: str, err: YouTubeApiError) -> None:
         self.last_error = f"{source}:{err.kind}:{err.reason or err.status or '-'}"
+        self._last_error_at = time.time()
 
     def _set_poll_delay(self, response: dict[str, Any]) -> None:
         hint = response.get("pollingIntervalMillis")
@@ -194,14 +197,19 @@ class ChatMonitor:
                 return False
 
         try:
-            sent = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, text, message_kind=message_kind)
+            if isinstance(self.youtube, YouTubeService):
+                sent, err = await asyncio.to_thread(
+                    self.youtube.send_message_detailed, self.live_chat_id, text, message_kind=message_kind
+                )
+            else:
+                sent = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, text, message_kind=message_kind)
+                err = getattr(self.youtube, "last_send_error", None)
         except Exception:
             logger.exception("Could not send chat message")
             return False
         if sent:
             self._last_activity_at = time.monotonic()
         else:
-            err = getattr(self.youtube, "last_send_error", None)
             if isinstance(err, YouTubeApiError):
                 self._record_api_error("send", err)
                 if err.stops_monitoring:
@@ -231,6 +239,8 @@ class ChatMonitor:
             self._set_poll_delay(response)
             self.next_page_token = response.get("nextPageToken")
             for item in response.get("items", []):
+                if not self.is_running:
+                    break  # stopped mid-batch (e.g. a reply found the chat ended)
                 snippet, message_id = item.get("snippet", {}), item.get("id")
                 author_details = item.get("authorDetails", {}) or {}
                 message = snippet.get("displayMessage", "") or snippet.get("textMessageDetails", {}).get("messageText", "")
@@ -252,7 +262,9 @@ class ChatMonitor:
         except Exception as exc:
             err = classify_youtube_error(exc)
             self._record_api_error("poll", err)
-            if err.stops_monitoring:
+            # A 403 on polling (e.g. a members-only chat) will not fix itself; on sends it
+            # can be a temporary moderator timeout, so only polling stops on it.
+            if err.stops_monitoring or err.kind == "forbidden":
                 if err.kind == "quota":
                     logger.error("YouTube quota exhausted; monitoring stops without retry")
                 else:
@@ -262,6 +274,8 @@ class ChatMonitor:
                 # receive (and let _monitor_loop handle) CancelledError.
                 await asyncio.sleep(0)
                 return
+            if err.kind == "invalid":
+                self.next_page_token = None  # e.g. pageTokenInvalid: start over instead of repeating it
             logger.warning("Polling failed (%s); retrying after exponential backoff", exc)
             raise
 

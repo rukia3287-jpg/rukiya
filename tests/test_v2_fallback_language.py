@@ -41,10 +41,31 @@ class LanguageDetectionTests(unittest.TestCase):
             "hi": ENGLISH,
             "I love this game": ENGLISH,
             "": ENGLISH,
+            # Informal Roman Telugu and more Hinglish.
+            "ela unnav": ROMAN_TELUGU,
+            "rukiya ela unnav": ROMAN_TELUGU,
+            "em chestunnav": ROMAN_TELUGU,
+            "em ayindi": ROMAN_TELUGU,
+            "chala bagundi": ROMAN_TELUGU,
+            "super ga undi": ROMAN_TELUGU,
+            "ye kaun hai": HINGLISH,
+            "kaha se ho": HINGLISH,
+            "theek hu": HINGLISH,
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(detect_reply_language(text), expected)
+
+
+class EnglishFalsePositiveTests(unittest.TestCase):
+    def test_english_chat_with_names_or_repeated_words_stays_english(self):
+        for text in (
+            "Raha is in the chat", "Rahi from Kerala here", "Mera name is John", "hai hai",
+            "ho ho ho merry christmas", "naa naa naa", "Raha left me and I want to die",
+            "what is the meaning of yaar", "sab good?", "go go go", "toh is a weird word",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(detect_reply_language(text), ENGLISH)
 
 
 class LocalizedFallbackTests(unittest.TestCase):
@@ -145,6 +166,48 @@ class FallbackRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         intent = orchestrator.decision_service.detect_intent(message.text)
         self.assertEqual(response.text, localize_fallback(FALLBACK_INTENTS.get(intent, FALLBACK_INTENTS["default"]), ROMAN_TELUGU))
+
+
+class LegacyPathTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_generate_leaves_rejected_output_to_the_localized_orchestrator_fallback(self):
+        from services.ai_service import AIService
+        ai = AIService(Config())
+        ai._call_openrouter = AsyncMock(return_value="You are an idiot.")
+        self.assertIsNone(await ai.generate([{"role": "user", "content": "x"}], author="v"))
+
+    async def test_legacy_generate_response_localizes_its_fallback(self):
+        from services.ai_service import AIService
+        ai = AIService(Config(openrouter_api_key="test-key"))
+        ai._call_openrouter = AsyncMock(return_value="You are an idiot.")
+        reply = await ai.generate_response("rukiya ela unnav", "v", bypass_trigger=True, bypass_cooldown=True)
+        self.assertEqual(reply, localize_fallback(DEFAULT_VALIDATOR_FALLBACK, ROMAN_TELUGU))
+
+    async def test_cog_direct_call_localizes_its_fallback(self):
+        from cogs.chat_bot import RukiyaCog
+
+        class FakeResponse:
+            status = 200
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "You are an idiot."}}]}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+        class FakeSession:
+            closed = False
+
+            def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        cog = RukiyaCog(MagicMock())
+        cog.api_key = "test-key"
+        cog.session = FakeSession()
+        reply = await cog.generate_reply("rukiya aap kaise ho", author="v")
+        self.assertEqual(reply, localize_fallback(DEFAULT_VALIDATOR_FALLBACK, HINGLISH))
 
 
 if __name__ == "__main__":

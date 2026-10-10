@@ -100,7 +100,9 @@ class YouTubeCommands(commands.Cog):
         embed.add_field(name="Processed messages", value=str(st.get("processed_count")), inline=True)
         embed.add_field(name="AI cooldown remaining", value=f"{st.get('ai_cooldown_remaining'):.1f}s", inline=True)
         if st.get("last_error"):
-            embed.add_field(name="Last YouTube API error", value=f"`{st['last_error']}`", inline=False)
+            age = st.get("last_error_age_s")
+            when = f" ({age:.0f}s ago)" if age is not None else ""
+            embed.add_field(name="Last YouTube API error", value=f"`{st['last_error']}`{when}", inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 

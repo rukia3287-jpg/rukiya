@@ -10,6 +10,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.ai_service import RUKIYA_SYSTEM_PROMPT as SAFE_RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
+from services.language import detect_reply_language
+from services.safety_service import DEFAULT_VALIDATOR_FALLBACK, localize_fallback
 from services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -290,7 +292,10 @@ class RukiyaCog(commands.Cog):
                     logger.error("OpenRouter response missing content")
                     return None
 
-                content = validate_rukiya_response(content.strip())
+                content = validate_rukiya_response(
+                    content.strip(),
+                    fallback=localize_fallback(DEFAULT_VALIDATOR_FALLBACK, detect_reply_language(message)),
+                )
                 # Hard cap
                 if len(content) > 300:
                     last = max(content.rfind("."), content.rfind("!"), content.rfind("?"))

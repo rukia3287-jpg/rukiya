@@ -110,9 +110,9 @@ FALLBACK_TRANSLATIONS: Dict[str, Dict[str, str]] = {
         TELUGU: "ఒక్క సెకను ఆగండి, చాట్.",
     },
     "Don't get used to being nice.": {
-        HINGLISH: "Zyada aadat mat daalo, samjhe?",
+        HINGLISH: "Meri itni nice baaton ki aadat mat daalo.",
         ROMAN_TELUGU: "Ee manchithanam ki alavatu padakandi.",
-        HINDI: "ज़्यादा आदत मत डालो, समझे?",
+        HINDI: "मेरी इतनी अच्छी बातों की आदत मत डालो।",
         TELUGU: "ఈ మంచితనానికి అలవాటు పడకండి.",
     },
     "Focus on the stream for now.": {
@@ -166,14 +166,14 @@ FALLBACK_TRANSLATIONS: Dict[str, Dict[str, str]] = {
     "Please reach out to someone you trust or a local crisis helpline right now, because you don't have to carry this alone.": {
         HINGLISH: "Please abhi kisi bharose wale insaan ya local crisis helpline se baat karo, tumhe ye sab akele nahi jhelna hai.",
         ROMAN_TELUGU: "Please ippude meeku nammakam unna evarithonaina leda local crisis helpline tho matladandi, meeru idi okkare mosukovalsina avasaram ledu.",
-        HINDI: "कृपया अभी किसी भरोसेमंद इंसान या लोकल क्राइसिस हेल्पलाइन से बात करो, तुम्हें ये सब अकेले नहीं झेलना है।",
+        HINDI: "कृपया अभी किसी भरोसेमंद इंसान या लोकल क्राइसिस हेल्पलाइन से बात करें, आपको यह सब अकेले नहीं सहना है।",
         TELUGU: "దయచేసి ఇప్పుడే మీరు నమ్మే ఎవరితోనైనా లేదా స్థానిక క్రైసిస్ హెల్ప్‌లైన్‌తో మాట్లాడండి, మీరు దీన్ని ఒంటరిగా మోయాల్సిన అవసరం లేదు.",
     },
     "That sounds really heavy, so please go easy on yourself and lean on someone you trust today.": {
         HINGLISH: "Ye sach mein bahut bhaari lag raha hai, apna khayal rakho aur aaj kisi apne se baat karo.",
-        ROMAN_TELUGU: "Idi nijamga chala bharamga undi, mee meeda jaagrattaga undandi, eeroju nammakam unna vallatho matladandi.",
+        ROMAN_TELUGU: "Idi nijamga chala bharamga anipistondi, mimmalni meeru jagrattaga chusukondi, eeroju meeku nammakam unna vallatho matladandi.",
         HINDI: "ये सच में बहुत भारी लग रहा है, अपना ख्याल रखो और आज किसी अपने से बात करो।",
-        TELUGU: "ఇది నిజంగా చాలా భారంగా ఉంది, మీ పట్ల జాగ్రత్తగా ఉండండి, ఈరోజు మీరు నమ్మే వారితో మాట్లాడండి.",
+        TELUGU: "ఇది నిజంగా చాలా భారంగా అనిపిస్తోంది, మిమ్మల్ని మీరు జాగ్రత్తగా చూసుకోండి, ఈరోజు మీకు నమ్మకం ఉన్న వారితో మాట్లాడండి.",
     },
 }
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import logging
 import tempfile
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import asyncio
 
 try:
@@ -20,6 +20,11 @@ except ImportError:
 
 # Import Config from the centralized location
 from services.config import Config
+
+try:
+    from google.auth.exceptions import RefreshError
+except ImportError:
+    RefreshError = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,12 @@ _KNOWN_REASONS = (
 
 def classify_youtube_error(exc: BaseException) -> YouTubeApiError:
     """Classify an exception from the YouTube API client (HttpError or a network error)."""
+    if RefreshError is not None and isinstance(exc, RefreshError):
+        # An expired or revoked OAuth token (google-auth refreshes on 401 itself, so this
+        # is how auth failures actually surface). Only explicitly retryable ones are transient.
+        if getattr(exc, "retryable", False):
+            return YouTubeApiError(kind="transient", status=None, reason="refresh_retryable", retryable=True, stops_monitoring=False)
+        return YouTubeApiError(kind="auth", status=None, reason="refresh_failed", retryable=False, stops_monitoring=True)
     resp = getattr(exc, "resp", None)
     status = getattr(resp, "status", None) or getattr(exc, "status_code", None)
     try:
@@ -244,11 +255,17 @@ class YouTubeService:
 
     def send_message(self, live_chat_id: str, message: str, *, message_kind: str = "reply") -> bool:
         """Blocking call to send a message; run via thread in async context."""
-        self.last_send_error = None
+        sent, err = self.send_message_detailed(live_chat_id, message, message_kind=message_kind)
+        self.last_send_error = err
+        return sent
+
+    def send_message_detailed(self, live_chat_id: str, message: str, *, message_kind: str = "reply") -> Tuple[bool, Optional[YouTubeApiError]]:
+        """Like send_message, but returns the classified error with the result, so concurrent
+        sends cannot overwrite each other's error."""
         nonessential = message_kind in {"idle", "welcome"}
         if nonessential and self._nonessential_insert_count >= self._nonessential_insert_cap:
             logger.warning("Non-essential insert cap (%d) reached; suppressing %s message", self._nonessential_insert_cap, message_kind)
-            return False
+            return False, None
         try:
             message_body = {
                 "snippet": {
@@ -269,15 +286,14 @@ class YouTubeService:
                     self._nonessential_warning_logged = True
                     logger.warning("Non-essential insert usage is at 80%% of the %d-call cap", self._nonessential_insert_cap)
             logger.info("✅ YouTube message sent (%s, %d chars)", message_kind, len(message))
-            return True
+            return True, None
 
         except Exception as e:
             err = classify_youtube_error(e)
-            self.last_send_error = err
             # Context for diagnosis, but never the message text itself.
             logger.log(
                 logging.ERROR if err.stops_monitoring else logging.WARNING,
                 "event=youtube_send_failed kind=%s status=%s reason=%s retryable=%s message_kind=%s chars=%d",
                 err.kind, err.status, err.reason or "-", str(err.retryable).lower(), message_kind, len(message),
             )
-            return False
+            return False, err
