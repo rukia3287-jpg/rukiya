@@ -15,6 +15,8 @@ from typing import Dict, List, Optional, Tuple
 
 from services.models import ChatMessage, GeneratedResponse, SafetyResult
 
+from services.language import ENGLISH, HINDI, HINGLISH, ROMAN_TELUGU, TELUGU
+
 logger = logging.getLogger(__name__)
 
 # System prompt excerpts & secrets patterns to never leak
@@ -89,7 +91,99 @@ SERIOUS_INTENT_INSTRUCTIONS: Dict[str, str] = {
 }
 
 
-def validate_rukiya_response(reply: str, fallback: str = "Hm. Keep it friendly, chat.") -> str:
+DEFAULT_VALIDATOR_FALLBACK = "Hm, keep it friendly, chat."
+
+# Fallbacks in the viewer's language, keyed by the English text. Every entry is a single
+# sentence so the one-sentence output validator never truncates it, and Romanized
+# languages stay in Latin letters (see services/language.py).
+FALLBACK_TRANSLATIONS: Dict[str, Dict[str, str]] = {
+    "Welcome in, chat.": {
+        HINGLISH: "Aao aao, welcome chat.",
+        ROMAN_TELUGU: "Randi randi, welcome chat.",
+        HINDI: "स्वागत है, चैट।",
+        TELUGU: "స్వాగతం, చాట్.",
+    },
+    "Give me a second, chat.": {
+        HINGLISH: "Ek second ruko, chat.",
+        ROMAN_TELUGU: "Oka second aagandi, chat.",
+        HINDI: "एक सेकंड रुको, चैट।",
+        TELUGU: "ఒక్క సెకను ఆగండి, చాట్.",
+    },
+    "Don't get used to being nice.": {
+        HINGLISH: "Zyada aadat mat daalo, samjhe?",
+        ROMAN_TELUGU: "Ee manchithanam ki alavatu padakandi.",
+        HINDI: "ज़्यादा आदत मत डालो, समझे?",
+        TELUGU: "ఈ మంచితనానికి అలవాటు పడకండి.",
+    },
+    "Focus on the stream for now.": {
+        HINGLISH: "Abhi stream pe dhyan do.",
+        ROMAN_TELUGU: "Ippatiki stream meeda focus pettandi.",
+        HINDI: "अभी स्ट्रीम पर ध्यान दो।",
+        TELUGU: "ప్రస్తుతానికి స్ట్రీమ్ మీద దృష్టి పెట్టండి.",
+    },
+    "Keep it civil, please.": {
+        HINGLISH: "Thoda tameez se, please.",
+        ROMAN_TELUGU: "Konchem maryadaga matladandi, please.",
+        HINDI: "थोड़ा तमीज़ से, प्लीज़।",
+        TELUGU: "కొంచెం మర్యాదగా మాట్లాడండి, ప్లీజ్.",
+    },
+    "Keep it friendly, chat.": {
+        HINGLISH: "Pyaar se baat karo, chat.",
+        ROMAN_TELUGU: "Friendly ga undandi, chat.",
+        HINDI: "प्यार से बात करो, चैट।",
+        TELUGU: "స్నేహంగా ఉండండి, చాట్.",
+    },
+    DEFAULT_VALIDATOR_FALLBACK: {
+        HINGLISH: "Hm, pyaar se baat karo, chat.",
+        ROMAN_TELUGU: "Hm, friendly ga undandi, chat.",
+        HINDI: "हम्म, प्यार से बात करो, चैट।",
+        TELUGU: "హ్మ్, స్నేహంగా ఉండండి, చాట్.",
+    },
+    "Hm, welcome in.": {
+        HINGLISH: "Hm, aao, welcome.",
+        ROMAN_TELUGU: "Hm, randi, welcome.",
+        HINDI: "हम्म, स्वागत है।",
+        TELUGU: "హ్మ్, స్వాగతం.",
+    },
+    "I can't verify that properly right now.": {
+        HINGLISH: "Abhi main ye theek se verify nahi kar sakti.",
+        ROMAN_TELUGU: "Ippudu nenu idi sariga verify cheyyalenu.",
+        HINDI: "अभी मैं इसे ठीक से वेरिफ़ाई नहीं कर सकती।",
+        TELUGU: "ప్రస్తుతం నేను దీన్ని సరిగ్గా నిర్ధారించలేను.",
+    },
+    "Tch, give me a second, chat.": {
+        HINGLISH: "Tch, ek second, chat.",
+        ROMAN_TELUGU: "Tch, oka second, chat.",
+        HINDI: "हुंह, एक सेकंड, चैट।",
+        TELUGU: "ఉఫ్, ఒక్క సెకను, చాట్.",
+    },
+    "Don't be reckless, chat.": {
+        HINGLISH: "Laaparwahi mat karo, chat.",
+        ROMAN_TELUGU: "Ashraddha ga undakandi, chat.",
+        HINDI: "लापरवाही मत करो, चैट।",
+        TELUGU: "అజాగ్రత్తగా ఉండకండి, చాట్.",
+    },
+    "Please reach out to someone you trust or a local crisis helpline right now, because you don't have to carry this alone.": {
+        HINGLISH: "Please abhi kisi bharose wale insaan ya local crisis helpline se baat karo, tumhe ye sab akele nahi jhelna hai.",
+        ROMAN_TELUGU: "Please ippude meeku nammakam unna evarithonaina leda local crisis helpline tho matladandi, meeru idi okkare mosukovalsina avasaram ledu.",
+        HINDI: "कृपया अभी किसी भरोसेमंद इंसान या लोकल क्राइसिस हेल्पलाइन से बात करो, तुम्हें ये सब अकेले नहीं झेलना है।",
+        TELUGU: "దయచేసి ఇప్పుడే మీరు నమ్మే ఎవరితోనైనా లేదా స్థానిక క్రైసిస్ హెల్ప్‌లైన్‌తో మాట్లాడండి, మీరు దీన్ని ఒంటరిగా మోయాల్సిన అవసరం లేదు.",
+    },
+    "That sounds really heavy, so please go easy on yourself and lean on someone you trust today.": {
+        HINGLISH: "Ye sach mein bahut bhaari lag raha hai, apna khayal rakho aur aaj kisi apne se baat karo.",
+        ROMAN_TELUGU: "Idi nijamga chala bharamga undi, mee meeda jaagrattaga undandi, eeroju nammakam unna vallatho matladandi.",
+        HINDI: "ये सच में बहुत भारी लग रहा है, अपना ख्याल रखो और आज किसी अपने से बात करो।",
+        TELUGU: "ఇది నిజంగా చాలా భారంగా ఉంది, మీ పట్ల జాగ్రత్తగా ఉండండి, ఈరోజు మీరు నమ్మే వారితో మాట్లాడండి.",
+    },
+}
+
+
+def localize_fallback(english_text: str, language: str = ENGLISH) -> str:
+    """Return the fallback in the viewer's language, or the English text if none exists."""
+    return FALLBACK_TRANSLATIONS.get(english_text, {}).get(language, english_text)
+
+
+def validate_rukiya_response(reply: str, fallback: str = DEFAULT_VALIDATOR_FALLBACK) -> str:
     """
     Enforce the public-facing persona limits even if the model ignores them.
     Preserves exact contract with V1 regression tests.
@@ -163,16 +257,16 @@ class SafetyService:
             risk_score=0.0
         )
 
-    def validate_output(self, response_text: str, intent: str = "default") -> Tuple[bool, str]:
+    def validate_output(self, response_text: str, intent: str = "default", language: str = ENGLISH) -> Tuple[bool, str]:
         """
         Validate generated response text.
         Returns (is_safe, sanitized_or_fallback_text).
         """
-        fallback = self.get_fallback(intent)
+        fallback = self.get_fallback(intent, language)
         validated = validate_rukiya_response(response_text, fallback=fallback)
         is_safe = (validated != fallback) or (response_text.strip() == fallback)
         return is_safe, validated
 
-    def get_fallback(self, intent: str) -> str:
-        """Return safe, in-character fallback response based on intent."""
-        return FALLBACK_INTENTS.get(intent, FALLBACK_INTENTS["default"])
+    def get_fallback(self, intent: str, language: str = ENGLISH) -> str:
+        """Return safe, in-character fallback response based on intent, in the viewer's language."""
+        return localize_fallback(FALLBACK_INTENTS.get(intent, FALLBACK_INTENTS["default"]), language)

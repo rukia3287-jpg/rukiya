@@ -33,16 +33,17 @@ from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
-from services.safety_service import FALLBACK_INTENTS, validate_rukiya_response
+from services.language import ENGLISH, detect_reply_language
+from services.safety_service import FALLBACK_INTENTS, localize_fallback, validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
-# Deterministic Fallbacks
+# Deterministic Fallbacks (single sentences; localized per request via localize_fallback)
 STATIC_FALLBACKS = {
-    "greeting": "Hm. Welcome in.",
+    "greeting": "Hm, welcome in.",
     "question": "I can't verify that properly right now.",
     "search_unavailable": "I can't verify that properly right now.",
-    "temporary_failure": "Tch. Give me a second, chat.",
+    "temporary_failure": "Tch, give me a second, chat.",
     "default": "Don't be reckless, chat.",
     # Serious messages share the orchestrator's caring fallbacks.
     "crisis": FALLBACK_INTENTS["crisis"],
@@ -131,10 +132,8 @@ class AIEngine:
             self.health_tracker.record_call(f"{name}:generation", not bool(res.error), res.latency_ms, error=res.error_details)
         return res
 
-    def get_fallback(self, intent: Optional[str] = None) -> str:
-        if intent == "greeting":
-            return STATIC_FALLBACKS["greeting"]
-        return STATIC_FALLBACKS.get(intent or "default", STATIC_FALLBACKS["default"])
+    def get_fallback(self, intent: Optional[str] = None, language: str = ENGLISH) -> str:
+        return localize_fallback(STATIC_FALLBACKS.get(intent or "default", STATIC_FALLBACKS["default"]), language)
 
     async def _execute_search_grounding(
         self,
@@ -267,6 +266,12 @@ class AIEngine:
         return result, False
 
     async def process(self, request: AIEngineRequest) -> AIEngineResult:
+        # Fallback replies follow the viewer's language and script.
+        language = detect_reply_language(request.text)
+
+        def fallback(intent: Optional[str] = None) -> str:
+            return self.get_fallback(intent, language)
+
         start_time = time.time()
         request_id = request.request_id
 
@@ -320,7 +325,7 @@ class AIEngine:
         # 3. Execution per Route
         try:
             if route == RouteType.STATIC_FALLBACK:
-                candidate_text = self.get_fallback(plan.intent)
+                candidate_text = fallback(plan.intent)
                 fallback_used = True
                 fallback_reason = "static_fallback"
                 provider_used = "static_fallback"
@@ -349,12 +354,12 @@ class AIEngine:
                             fallback_used = False
                             fallback_reason = None
                         else:
-                            candidate_text = self.get_fallback(plan.intent)
+                            candidate_text = fallback(plan.intent)
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                             executed_route = "static_fallback"
                     else:
-                        candidate_text = self.get_fallback(plan.intent)
+                        candidate_text = fallback(plan.intent)
                         provider_used = "static_fallback"
                         final_provider = "static_fallback"
                         executed_route = "static_fallback"
@@ -368,7 +373,7 @@ class AIEngine:
                 if res.text and not res.error:
                     candidate_text = res.text
                 else:
-                    candidate_text = self.get_fallback(plan.intent)
+                    candidate_text = fallback(plan.intent)
                     provider_used = "static_fallback"
                     final_provider = "static_fallback"
                     fallback_used = True
@@ -402,7 +407,7 @@ class AIEngine:
                         if sr.text.strip():
                             candidate_text = sr.text.strip()
                         else:
-                            candidate_text = self.get_fallback("search_unavailable")
+                            candidate_text = fallback("search_unavailable")
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                             fallback_used = True
@@ -429,7 +434,7 @@ class AIEngine:
                             fallback_used = True
                             fallback_reason = "openrouter_failed"
                         else:
-                            candidate_text = self.get_fallback(plan.intent)
+                            candidate_text = fallback(plan.intent)
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                             fallback_used = True
@@ -470,11 +475,11 @@ class AIEngine:
                                 provider_used = "degraded_hybrid (gemini)"
                                 final_provider = "gemini"
                             else:
-                                candidate_text = self.get_fallback("search_unavailable")
+                                candidate_text = fallback("search_unavailable")
                                 provider_used = "static_fallback"
                                 final_provider = "static_fallback"
                         else:
-                            candidate_text = self.get_fallback("search_unavailable")
+                            candidate_text = fallback("search_unavailable")
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                     elif gemini and self.health_tracker.is_available("gemini:generation"):
@@ -493,17 +498,17 @@ class AIEngine:
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                         else:
-                            candidate_text = self.get_fallback("search_unavailable")
+                            candidate_text = fallback("search_unavailable")
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                     else:
-                        candidate_text = self.get_fallback("search_unavailable")
+                        candidate_text = fallback("search_unavailable")
                         provider_used = "static_fallback"
                         final_provider = "static_fallback"
 
         except Exception as e:
             logger.exception("AI Engine execution exception: %s", e)
-            candidate_text = self.get_fallback(plan.intent)
+            candidate_text = fallback(plan.intent)
             fallback_used = True
             fallback_reason = "exception"
             provider_used = "static_fallback"
@@ -557,21 +562,21 @@ class AIEngine:
 
                 if final_report.verdict != CriticVerdict.PASS:
                     logger.warning("Repair loop exhausted; adopting safe fallback.")
-                    candidate_text = self.get_fallback(plan.intent if not (search_attempted and not search_succeeded) else "search_unavailable")
+                    candidate_text = fallback(plan.intent if not (search_attempted and not search_succeeded) else "search_unavailable")
                     fallback_used = True
                     fallback_reason = "critic_repair_exhausted"
                     final_provider = "static_fallback"
 
             elif report.verdict == CriticVerdict.REJECT:
                 logger.warning("Critic REJECTED response due to safety: %s", report.reasons)
-                candidate_text = self.get_fallback(plan.intent)
+                candidate_text = fallback(plan.intent)
                 fallback_used = True
                 fallback_reason = "critic_rejected"
                 final_provider = "static_fallback"
 
         # 5. Output Validation
         if not fallback_used:
-            fallback_text = self.get_fallback(plan.intent)
+            fallback_text = fallback(plan.intent)
             validated = validate_rukiya_response(candidate_text, fallback=fallback_text)
             if validated == fallback_text and candidate_text.strip() != fallback_text:
                 fallback_used = True

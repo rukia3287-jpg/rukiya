@@ -135,7 +135,7 @@ class TestV2Security(unittest.TestCase):
         for s in secrets:
             with self.subTest(s=s):
                 out = validate_rukiya_response(f"Here is your info: {s}.")
-                self.assertEqual(out, "Hm. Keep it friendly, chat.")
+                self.assertEqual(out, "Hm, keep it friendly, chat.")
 
 
 if __name__ == "__main__":

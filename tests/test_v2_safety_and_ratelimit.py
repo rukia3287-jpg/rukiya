@@ -39,12 +39,12 @@ class TestSafetyService(unittest.TestCase):
         # Unsafe insults stripped / fallbacked
         raw_insult = "You are a stupid idiot dumbass."
         sanitized_insult = validate_rukiya_response(raw_insult)
-        self.assertEqual(sanitized_insult, "Hm. Keep it friendly, chat.")
+        self.assertEqual(sanitized_insult, "Hm, keep it friendly, chat.")
 
     def test_secret_leakage_prevented(self):
         raw_leak = "Here is the key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz123456"
         sanitized = validate_rukiya_response(raw_leak)
-        self.assertEqual(sanitized, "Hm. Keep it friendly, chat.")
+        self.assertEqual(sanitized, "Hm, keep it friendly, chat.")
 
     def test_fallback_responses_by_intent(self):
         greeting_fb = self.safety.get_fallback("greeting")

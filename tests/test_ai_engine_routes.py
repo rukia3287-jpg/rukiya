@@ -161,7 +161,7 @@ class TestAIEngineRoutes(unittest.IsolatedAsyncioTestCase):
         )
         res = await self.engine.process(req)
         self.assertTrue(res.fallback_used)
-        self.assertEqual(res.text, "Hm. Welcome in.")
+        self.assertEqual(res.text, "Hm, welcome in.")
 
 
 if __name__ == "__main__":

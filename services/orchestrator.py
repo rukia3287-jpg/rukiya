@@ -20,6 +20,7 @@ from services.identity_service import IdentityService
 from services.memory_service import MemoryService
 from services.models import ChatMessage, GeneratedResponse, ResponseDecision, UserIdentity
 from services.rate_limiter import RateLimiter
+from services.language import detect_reply_language
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, SafetyService
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,8 @@ class RukiyaOrchestrator:
 
         # 2. Input Safety Check (Prompt injection defense)
         safety_input = self.safety_service.validate_input(message)
+        # Fallback replies follow the viewer's language and script.
+        language = detect_reply_language(message.text)
         if not safety_input.allowed:
             logger.warning("event=input_safety_blocked user=%s reason='%s'", user.canonical_id, safety_input.reason)
             return None
@@ -161,7 +164,7 @@ class RukiyaOrchestrator:
 
         # If AI failed or returned None, use safe intent-based fallback
         if not generated or not generated.text.strip():
-            fallback_text = self.safety_service.get_fallback(decision.intent)
+            fallback_text = self.safety_service.get_fallback(decision.intent, language)
             generated = GeneratedResponse(
                 text=fallback_text,
                 confidence=0.5,
@@ -172,14 +175,14 @@ class RukiyaOrchestrator:
             logger.info("event=fallback_used intent=%s text='%s'", decision.intent, fallback_text)
 
         # 8. Output Safety Validation
-        is_safe, validated_text = self.safety_service.validate_output(generated.text, intent=decision.intent)
+        is_safe, validated_text = self.safety_service.validate_output(generated.text, intent=decision.intent, language=language)
         generated.text = validated_text
 
         # 9. Anti-Repetition Check
         if self.decision_service.is_repetitive(generated.text):
             logger.info("event=repetition_detected rejecting text='%s'", generated.text)
             # Use fallback instead of repeating
-            generated.text = self.safety_service.get_fallback(decision.intent)
+            generated.text = self.safety_service.get_fallback(decision.intent, language)
             generated.is_fallback = True
 
         # 10. Register Response in Decision & Anti-Repeat Tracking
