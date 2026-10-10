@@ -111,19 +111,29 @@ class BudgetManager:
         return True
 
     def try_reserve_search(self) -> bool:
-        """Count one grounded search about to be dispatched; False if the daily cap is reached."""
+        """Count one grounded search about to be dispatched.
+
+        False if the daily search cap or the global provider cap is reached.
+        """
         self._check_rollover()
         if self.search_count >= self.daily_search_limit:
             logger.warning("Gemini search daily limit reached: %d/%d", self.search_count, self.daily_search_limit)
+            return False
+        if self.generation_budget_exhausted():
+            logger.warning("Global daily AI limit reached: %d", self.global_daily_limit)
             return False
         self.search_count += 1
         self.gemini_count += 1
         return True
 
+    def generation_budget_exhausted(self) -> bool:
+        """True once today's provider operations have reached global_daily_limit."""
+        self._check_rollover()
+        return self.openrouter_count + self.gemini_count >= self.global_daily_limit
+
     def try_reserve_generation(self, provider: str) -> bool:
         """Count one generation about to be dispatched; False if the global daily cap is reached."""
-        self._check_rollover()
-        if self.openrouter_count + self.gemini_count >= self.global_daily_limit:
+        if self.generation_budget_exhausted():
             logger.warning("Global daily AI limit reached: %d", self.global_daily_limit)
             return False
         if provider == "openrouter":

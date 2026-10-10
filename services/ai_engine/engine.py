@@ -94,9 +94,22 @@ class AIEngine:
         """Dispatch one generation call (primary, backup or repair).
 
         Every dispatch counts toward the global daily cap, whether it succeeds or not.
-        Over the cap the call is refused without dispatch and without touching provider
-        health, since the provider did nothing wrong.
+        Over the cap, or for a missing/unconfigured provider, the call is refused without
+        dispatch, without being counted, and without touching provider health.
         """
+        if provider is None or not provider.is_configured():
+            name = getattr(provider, "name", "unknown")
+            return AIProviderResult(
+                text="",
+                provider=name,
+                error=f"Provider {name} is not configured",
+                error_details=ProviderError(
+                    provider=name,
+                    capability="generation",
+                    category=ErrorCategory.AUTH_ERROR,
+                    retryable=False
+                )
+            )
         name = provider.name
         if not self.budget_manager.try_reserve_generation(name):
             return AIProviderResult(
@@ -493,6 +506,15 @@ class AIEngine:
             provider_used = "static_fallback"
             final_provider = "static_fallback"
             error_msg = str(e)
+        except asyncio.CancelledError:
+            # A cancelled request (e.g. the YouTube monitor stopping) was not served.
+            if user_reserved:
+                self.budget_manager.refund_user_request(request.user_id)
+            raise
+
+        if final_provider == "static_fallback" and route != RouteType.STATIC_FALLBACK and self.budget_manager.generation_budget_exhausted():
+            # Telemetry: the global cap, not a provider failure, is why nothing answered.
+            fallback_reason = "budget_exhausted"
 
         # One logical request costs one unit of the user's daily AI budget, however many
         # provider operations (search + synthesis, backup) served it. Static fallbacks are free.

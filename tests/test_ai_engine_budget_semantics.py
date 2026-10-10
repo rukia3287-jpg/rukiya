@@ -6,6 +6,7 @@ Budget accounting policy (see services/ai_engine/budget.py):
 """
 import asyncio
 import unittest
+import unittest.mock
 from unittest.mock import AsyncMock, patch
 
 from services.ai_engine.budget import BudgetManager
@@ -180,10 +181,72 @@ class BudgetSemanticsTests(unittest.IsolatedAsyncioTestCase):
 
         # The refunded unit is still available once providers recover.
         self.openrouter.generate_mock.return_value = AIProviderResult(text="Back again.", provider="openrouter")
-        engine.health_tracker = type(engine.health_tracker)()
         second = await engine.process(self._chat_request(2))
         self.assertEqual(second.final_provider, "openrouter")
         self.assertEqual(budget.user_counts["viewer"], 1)
+
+    async def test_concurrent_searches_cannot_exceed_the_global_cap(self):
+        budget = BudgetManager(self.config, daily_search_limit=10, global_daily_limit=2, user_daily_limit=50)
+        engine = self._engine(budget)
+
+        async def slow_search(query, **kwargs):
+            await asyncio.sleep(0.05)
+            return _search_ok(query)
+
+        self.gemini.search_mock.side_effect = slow_search
+
+        await asyncio.gather(*(engine.process(self._search_request(i, user=f"u{i}")) for i in range(6)))
+
+        self.assertEqual(self.gemini.search_mock.await_count, 2)
+        self.assertLessEqual(budget.openrouter_count + budget.gemini_count, 2)
+
+    async def test_generation_over_the_global_cap_is_refused_without_dispatch(self):
+        budget = BudgetManager(self.config, global_daily_limit=0, user_daily_limit=10)
+        engine = self._engine(budget)
+        engine.health_tracker.record_call = unittest.mock.MagicMock()
+
+        # Simulate a request that was routed before the cap filled up.
+        with patch.object(budget, "can_execute_ai", return_value=True):
+            result = await engine.process(self._chat_request(1))
+
+        self.assertEqual(result.final_provider, "static_fallback")
+        self.assertEqual(result.fallback_reason, "budget_exhausted")
+        self.openrouter.generate_mock.assert_not_awaited()
+        self.gemini.generate_mock.assert_not_awaited()
+        engine.health_tracker.record_call.assert_not_called()
+        self.assertEqual(budget.user_counts.get("viewer", 0), 0)
+
+    async def test_cancelled_request_refunds_the_user_reservation(self):
+        budget = BudgetManager(self.config, user_daily_limit=10)
+        engine = self._engine(budget)
+        started = asyncio.Event()
+
+        async def hanging_generate(messages, **kwargs):
+            started.set()
+            await asyncio.sleep(30)
+
+        self.openrouter.generate_mock.side_effect = hanging_generate
+
+        task = asyncio.create_task(engine.process(self._chat_request(1)))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(budget.user_counts.get("viewer", 0), 0)
+
+    async def test_unconfigured_provider_is_not_dispatched_and_backup_still_runs(self):
+        budget = BudgetManager(self.config, user_daily_limit=10)
+        unconfigured = StubProvider("openrouter", configured=False)
+        engine = self._engine(budget, openrouter=unconfigured)
+
+        with patch.object(engine.router, "route", return_value=RouteType.OPENROUTER_DIRECT):
+            result = await engine.process(self._chat_request(1))
+
+        self.assertEqual(result.final_provider, "gemini_backup")
+        unconfigured.generate_mock.assert_not_awaited()
+        self.assertEqual(budget.openrouter_count, 0)
+        self.assertEqual(budget.gemini_count, 1)
 
     def test_day_rollover_resets_every_counter(self):
         # A search is also a Gemini operation, so it uses one of the two global slots.
