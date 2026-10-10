@@ -1,19 +1,14 @@
 import asyncio
 import sys
 import threading
-import types
 import unittest
 from unittest.mock import patch
 
 from services.chat_monitor import ChatMonitor
 
-# The quota logic is unit-tested without requiring production OAuth packages.
-for module_name in ("googleapiclient", "googleapiclient.discovery", "googleapiclient.errors", "google", "google.auth", "google.auth.transport", "google.auth.transport.requests", "google.oauth2", "google.oauth2.credentials"):
-    sys.modules.setdefault(module_name, types.ModuleType(module_name))
-sys.modules["googleapiclient.discovery"].build = lambda *_args, **_kwargs: None
-sys.modules["googleapiclient.errors"].HttpError = type("HttpError", (Exception,), {})
-sys.modules["google.auth.transport.requests"].Request = type("Request", (), {})
-sys.modules["google.oauth2.credentials"].Credentials = type("Credentials", (), {})
+# No sys.modules stubs here: youtube_service already degrades gracefully when the
+# Google OAuth packages are missing, and stubbing "google" would hide google.genai
+# from every other test module in the same discovery run.
 from services.youtube_service import YouTubeService
 from services.ai_service import RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
 
@@ -143,6 +138,15 @@ class InsertGoalTests(unittest.TestCase):
         self.assertTrue(any("80%" in line for line in logs.output))
         self.assertTrue(service.send_message("chat", "direct reply", message_kind="reply"))
         self.assertEqual(len(inserts), 61)
+
+
+class TestSuiteIsolationTests(unittest.TestCase):
+    def test_test_modules_do_not_shadow_installed_google_namespace(self):
+        # unittest discovery imports every test module before running any test, so a
+        # module-level sys.modules stub for "google" breaks google.genai suite-wide.
+        google_pkg = sys.modules.get("google")
+        if google_pkg is not None:
+            self.assertTrue(hasattr(google_pkg, "__path__"), "'google' was replaced by a non-package stub")
 
 
 class PersonaGoalTests(unittest.TestCase):
