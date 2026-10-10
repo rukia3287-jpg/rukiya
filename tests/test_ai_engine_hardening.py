@@ -510,6 +510,65 @@ class TestAIEngineHardening(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second.search_attempted)
         self.assertEqual(self.mock_gem.search_mock.await_count, 1)
 
+    async def test_hybrid_request_counts_each_operation_once(self):
+        """A hybrid request is one search and one generation globally, but one unit of user budget."""
+        budget = BudgetManager(self.config, daily_search_limit=10, user_daily_limit=5)
+        engine = AIEngine(config=self.config, registry=self.registry, budget_manager=budget)
+        self.mock_gem.search_mock.return_value = AIProviderResult(
+            text="Fresh grounded result.",
+            provider="gemini",
+            used_search=True,
+            citations=[{"url": "https://example.com", "title": "Example"}],
+        )
+        self.mock_or.generate_mock.return_value = AIProviderResult(text="Synthesized reply.", provider="openrouter")
+
+        result = await engine.process(
+            AIEngineRequest(text="latest genshin update for accounting test", author="acct", user_id="acct", intent="question")
+        )
+
+        self.assertTrue(result.search_succeeded)
+        self.assertEqual(result.final_provider, "openrouter")
+        self.assertEqual(budget.search_count, 1)
+        self.assertEqual(budget.openrouter_count, 1)
+        self.assertEqual(budget.user_counts["acct"], 1)
+
+    async def test_search_only_route_charges_user_budget(self):
+        """Search usage counts against the user even when no generation follows it."""
+        registry = ProviderRegistry(self.config)
+        registry.register(MockProvider("openrouter", False))
+        registry.register(self.mock_gem)
+        budget = BudgetManager(self.config, daily_search_limit=10, user_daily_limit=5)
+        engine = AIEngine(config=self.config, registry=registry, budget_manager=budget)
+        self.mock_gem.search_mock.return_value = AIProviderResult(
+            text="Patch notes say version five is out.",
+            provider="gemini",
+            used_search=True,
+            citations=[{"url": "https://example.com", "title": "Example"}],
+        )
+
+        result = await engine.process(
+            AIEngineRequest(text="latest genshin update for search only test", author="solo", user_id="solo", intent="question")
+        )
+
+        self.assertEqual(result.planned_route, RouteType.GEMINI_SEARCH.value)
+        self.assertEqual(budget.search_count, 1)
+        self.assertEqual(budget.user_counts["solo"], 1)
+
+    async def test_static_fallback_does_not_charge_user_budget(self):
+        """Requests that no provider served do not consume the user's AI budget."""
+        budget = BudgetManager(self.config, daily_search_limit=10, user_daily_limit=5)
+        engine = AIEngine(config=self.config, registry=self.registry, budget_manager=budget)
+        failure = AIProviderResult(text="", provider="openrouter", error="boom")
+        self.mock_or.generate_mock.return_value = failure
+        self.mock_gem.generate_mock.return_value = AIProviderResult(text="", provider="gemini", error="boom")
+
+        result = await engine.process(
+            AIEngineRequest(text="hello there friend", author="unlucky", user_id="unlucky", intent="chatter")
+        )
+
+        self.assertEqual(result.final_provider, "static_fallback")
+        self.assertEqual(budget.user_counts.get("unlucky", 0), 0)
+
     async def test_openrouter_429_is_structured_and_fails_fast(self):
         """OpenRouter 429 must produce structured rate-limit telemetry after one request."""
         from services.ai_engine.providers.openrouter import OpenRouterProvider

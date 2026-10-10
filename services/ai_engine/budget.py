@@ -110,6 +110,16 @@ class BudgetManager:
         if user_id:
             self.user_counts[user_id] = self.user_counts.get(user_id, 0) + 1
 
+    def record_user_request(self, user_id: Optional[str]) -> None:
+        """Charge one unit of the user's daily AI budget for one logical request.
+
+        The engine calls this once per request served by a provider, however many
+        provider operations (search, synthesis, backup) that request needed.
+        """
+        self._check_rollover()
+        if user_id:
+            self.user_counts[user_id] = self.user_counts.get(user_id, 0) + 1
+
     def get_remaining_searches(self) -> int:
         self._check_rollover()
         return max(0, self.daily_search_limit - self.search_count)

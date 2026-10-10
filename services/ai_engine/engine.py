@@ -100,7 +100,6 @@ class AIEngine:
         category: str = "general",
         time_scope: str = "",
         request_id: Optional[str] = None,
-        user_id: Optional[str] = None,
     ) -> Tuple[SearchResult, bool]:
         """Fetch search result from positive cache, negative cache, in-flight task, or Gemini provider."""
         # 1. Check positive cache
@@ -203,7 +202,7 @@ class AIEngine:
                 error_details=None
             )
             # Record in budget & positive cache
-            self.budget_manager.record_search(user_id=user_id)
+            self.budget_manager.record_search()
             self.cache.set(query, sr, category=category, time_scope=time_scope)
             return sr
 
@@ -270,7 +269,7 @@ class AIEngine:
 
                 if res.text and not res.error:
                     candidate_text = res.text
-                    self.budget_manager.record_generation("openrouter", request.user_id)
+                    self.budget_manager.record_generation("openrouter")
                 else:
                     # Automatic BACKUP to Gemini
                     logger.warning("OpenRouter failed; triggering BACKUP route to Gemini.")
@@ -286,7 +285,7 @@ class AIEngine:
                             executed_route = "backup"
                             fallback_used = False
                             fallback_reason = None
-                            self.budget_manager.record_generation("gemini", request.user_id)
+                            self.budget_manager.record_generation("gemini")
                         else:
                             candidate_text = self.get_fallback(plan.intent)
                             provider_used = "static_fallback"
@@ -307,7 +306,7 @@ class AIEngine:
 
                 if res.text and not res.error:
                     candidate_text = res.text
-                    self.budget_manager.record_generation("gemini", request.user_id)
+                    self.budget_manager.record_generation("gemini")
                 else:
                     candidate_text = self.get_fallback(plan.intent)
                     provider_used = "static_fallback"
@@ -326,7 +325,6 @@ class AIEngine:
                     category=category,
                     time_scope=time_scope,
                     request_id=request_id,
-                    user_id=request.user_id,
                 )
                 cache_hit = hit
                 citations = sr.citations
@@ -365,7 +363,7 @@ class AIEngine:
                         self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
-                            self.budget_manager.record_generation("openrouter", request.user_id)
+                            self.budget_manager.record_generation("openrouter")
                         elif sr.text.strip():
                             candidate_text = sr.text.strip()
                             provider_used = "gemini_search"
@@ -408,7 +406,7 @@ class AIEngine:
                         self.health_tracker.record_call("openrouter:generation", not bool(gen_res.error), gen_res.latency_ms, error=gen_res.error_details)
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
-                            self.budget_manager.record_generation("openrouter", request.user_id)
+                            self.budget_manager.record_generation("openrouter")
                         elif gemini and self.health_tracker.is_available("gemini:generation"):
                             b_res = await self.executor.execute_generate(gemini, hybrid_messages)
                             self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
@@ -416,7 +414,7 @@ class AIEngine:
                                 candidate_text = b_res.text
                                 provider_used = "degraded_hybrid (gemini)"
                                 final_provider = "gemini"
-                                self.budget_manager.record_generation("gemini", request.user_id)
+                                self.budget_manager.record_generation("gemini")
                             else:
                                 candidate_text = self.get_fallback("search_unavailable")
                                 provider_used = "static_fallback"
@@ -441,7 +439,7 @@ class AIEngine:
                         self.health_tracker.record_call("gemini:generation", not bool(b_res.error), b_res.latency_ms, error=b_res.error_details)
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
-                            self.budget_manager.record_generation("gemini", request.user_id)
+                            self.budget_manager.record_generation("gemini")
                         else:
                             candidate_text = self.get_fallback("search_unavailable")
                             provider_used = "static_fallback"
@@ -459,6 +457,11 @@ class AIEngine:
             provider_used = "static_fallback"
             final_provider = "static_fallback"
             error_msg = str(e)
+
+        # One logical request costs one unit of the user's daily AI budget, however many
+        # provider operations (search + synthesis, backup) served it. Static fallbacks are free.
+        if final_provider not in ("none", "static_fallback"):
+            self.budget_manager.record_user_request(request.user_id)
 
         # 4. Self-Critic & Repair Loop
         if candidate_text and final_provider != "static_fallback":
