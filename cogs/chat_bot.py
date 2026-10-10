@@ -140,7 +140,10 @@ class RukiyaCog(commands.Cog):
                         bypass_trigger=True,
                         bypass_cooldown=True
                     )
-                if not reply:
+                else:
+                    # Legacy direct call only when no pipeline is wired up. With a pipeline,
+                    # an empty reply is a deliberate refusal (input safety, decision rules)
+                    # and must not be retried through an unfiltered raw model call.
                     reply = await self.generate_reply(cleaned_text, author=message.author.display_name)
 
                 if reply:
@@ -413,11 +416,15 @@ class RukiyaCog(commands.Cog):
                 bypass_trigger=True,
                 bypass_cooldown=True
             )
-        if not reply:
+        else:
+            # Legacy direct call only when no pipeline is wired up (see on_message).
             reply = await self.generate_reply(question, author=interaction.user.display_name)
 
         if not reply:
-            await interaction.followup.send("❌ No response from model. Please check logs or API key.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Rukiya didn't answer that one (blocked by safety rules, rate-limited, or the model is unavailable).",
+                ephemeral=True,
+            )
             return
 
         embed = discord.Embed(
