@@ -91,7 +91,7 @@ class RukiyaOrchestrator:
         )
 
         # Record incoming interaction regardless of response
-        self.memory_service.record_interaction(user, message.text, role="user")
+        self.memory_service.record_interaction(user, message.text, role="user", timestamp=message.timestamp)
 
         if not decision.should_respond:
             return None

@@ -69,7 +69,8 @@ class TestIdentityService(unittest.TestCase):
             timestamp=1000.0,
         )
         user = self.identity.resolve(first)
-        self.memory.record_interaction(user, first.text, role="user")
+        # Mirrors the orchestrator, which records the user turn with the message's own timestamp.
+        self.memory.record_interaction(user, first.text, role="user", timestamp=first.timestamp)
         previous_last_seen = user.last_seen
 
         second = ChatMessage(
@@ -86,6 +87,22 @@ class TestIdentityService(unittest.TestCase):
         self.assertEqual(resolved.canonical_id, user.canonical_id)
         self.assertEqual(resolved.last_seen, previous_last_seen)
         self.assertEqual(resolved.last_seen, 1000.0)
+
+    def test_record_interaction_never_moves_last_seen_backwards(self):
+        msg = ChatMessage(
+            platform="youtube",
+            message_id="m_monotonic",
+            user_id="UC_monotonic",
+            username="viewer",
+            display_name="Viewer",
+            text="hello",
+            timestamp=5000.0,
+        )
+        user = self.identity.resolve(msg)
+        self.memory.record_interaction(user, "late duplicate", role="user", timestamp=4000.0)
+
+        self.assertEqual(user.last_seen, 5000.0)
+        self.assertEqual(self.memory.get_user(user.canonical_id).last_seen, 5000.0)
 
     def test_explicit_link_identities(self):
         self.identity.link_identities("discord:111", "youtube:UC_222")

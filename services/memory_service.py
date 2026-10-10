@@ -277,9 +277,18 @@ class MemoryService:
         finally:
             conn.close()
 
-    def record_interaction(self, user: UserIdentity, text: str, role: str = "user", session_id: Optional[str] = None) -> None:
-        now = time.time()
-        user.last_seen = now
+    def record_interaction(
+        self,
+        user: UserIdentity,
+        text: str,
+        role: str = "user",
+        session_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+    ) -> None:
+        # Use the message's own timestamp when known, so last_seen stays on the same clock
+        # IdentityService uses for first_seen; last_seen never moves backwards.
+        now = time.time() if timestamp is None else timestamp
+        user.last_seen = max(user.last_seen, now)
         if role == "user":
             user.interaction_count += 1
         self.save_user(user)

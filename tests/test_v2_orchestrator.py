@@ -9,7 +9,7 @@ from services.config import Config
 from services.decision_service import DecisionService
 from services.identity_service import IdentityService
 from services.memory_service import MemoryService
-from services.models import ChatMessage, GeneratedResponse
+from services.models import ChatMessage, GeneratedResponse, ResponseDecision
 from services.orchestrator import RukiyaOrchestrator
 from services.rate_limiter import RateLimiter
 from services.safety_service import SafetyService
@@ -46,6 +46,25 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
                 os.remove(self.db_path)
             except Exception:
                 pass
+
+    async def test_user_turn_records_message_timestamp_as_last_seen(self):
+        self.decision.decide = MagicMock(return_value=ResponseDecision(should_respond=False, reason="test"))
+        msg = ChatMessage(
+            platform="youtube",
+            message_id="msg_ts",
+            user_id="UC_ts",
+            username="ts_viewer",
+            display_name="TsViewer",
+            text="just chatting",
+            timestamp=1234.5,
+        )
+
+        response = await self.orchestrator.process_message(msg)
+
+        self.assertIsNone(response)
+        stored = self.memory.get_user("youtube:UC_ts")
+        self.assertEqual(stored.last_seen, 1234.5)
+        self.assertEqual(stored.interaction_count, 1)
 
     async def test_full_pipeline_success(self):
         msg = ChatMessage(
