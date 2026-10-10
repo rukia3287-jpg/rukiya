@@ -104,5 +104,5 @@ class JevAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.post.await_count, 1)
 
 
-if __await__ == "__main__":
+if __name__ == "__main__":
     unittest.main()
