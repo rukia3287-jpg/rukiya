@@ -18,6 +18,7 @@ from services.decision_service import DecisionService
 from services.rate_limiter import RateLimiter
 from services.orchestrator import RukiyaOrchestrator
 from services.ai_engine import AIEngine
+from services.runtime_status import build_health_payload, shutdown_services
 
 # Logging
 logging.basicConfig(
@@ -84,6 +85,9 @@ class RukiyaBot(commands.Bot):
             orchestrator=self.orchestrator
         )
 
+        # Cogs that failed to load, surfaced by /health.
+        self.failed_cogs: list[str] = []
+
         logger.info("RukiyaBot V2 services and orchestrator initialized successfully")
 
     async def setup_hook(self):
@@ -95,8 +99,10 @@ class RukiyaBot(commands.Bot):
                 try:
                     await self.load_extension(module_path)
                     logger.info(f"✅ Loaded cog: {module_path}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to load {module_path}: {e}")
+                except Exception:
+                    # Full traceback: a bare message hides import errors inside the cog.
+                    logger.exception(f"❌ Failed to load {module_path}")
+                    self.failed_cogs.append(module_path)
 
         try:
             synced = await self.tree.sync()
@@ -109,21 +115,18 @@ class RukiyaBot(commands.Bot):
         logger.info(f"📊 Connected to {len(self.guilds)} guild(s)")
 
     async def close(self):
-        try:
-            if hasattr(self, "orchestrator") and hasattr(self.orchestrator, "aclose"):
-                await self.orchestrator.aclose()
-        except Exception as e:
-            logger.warning("Error during orchestrator shutdown: %s", e)
+        # Stop the YouTube polling task and AI engine before the Discord client goes away.
+        await shutdown_services(self)
         await super().close()
 
 
 # ----- Render health server -----
 
-async def health_check(request):
-    return web.Response(text="Bot is running!", status=200)
+async def start_web_server(bot: RukiyaBot):
+    async def health_check(request):
+        # Always 200 so the host's liveness probe passes; the body reports degradation.
+        return web.json_response(build_health_payload(bot), status=200)
 
-
-async def start_web_server():
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -141,7 +144,7 @@ async def start_web_server():
 async def main():
     try:
         bot = RukiyaBot()
-        await start_web_server()
+        await start_web_server(bot)
         await bot.start(bot.config.discord_token)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
