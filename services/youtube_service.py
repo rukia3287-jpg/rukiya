@@ -1,5 +1,6 @@
 # services/youtube_service.py
 import os
+from dataclasses import dataclass
 import json
 import logging
 import tempfile
@@ -19,6 +20,66 @@ except ImportError:
 
 # Import Config from the centralized location
 from services.config import Config
+
+
+@dataclass(frozen=True)
+class YouTubeApiError:
+    """A classified YouTube Data API failure."""
+    kind: str               # quota | rate_limited | chat_ended | auth | forbidden | invalid | transient
+    status: Optional[int]
+    reason: str
+    retryable: bool         # a later call may succeed
+    stops_monitoring: bool  # nothing will succeed for this live chat; stop polling/sending
+
+
+_KNOWN_REASONS = (
+    "quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded", "userRateLimitExceeded",
+    "liveChatEnded", "liveChatDisabled", "liveChatNotFound", "forbidden", "insufficientPermissions",
+    "messageTextInvalid", "messageTooLong", "authError",
+)
+
+
+def classify_youtube_error(exc: BaseException) -> YouTubeApiError:
+    """Classify an exception from the YouTube API client (HttpError or a network error)."""
+    resp = getattr(exc, "resp", None)
+    status = getattr(resp, "status", None) or getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    content = getattr(exc, "content", b"") or b""
+    if isinstance(content, bytes):
+        content = content.decode("utf-8", "replace")
+
+    reason = ""
+    try:
+        data = json.loads(content) if content else {}
+        error = data.get("error", data) if isinstance(data, dict) else {}
+        if isinstance(error, dict):
+            errors = error.get("errors") or []
+            reason = str((errors[0].get("reason") if errors else error.get("reason")) or "")
+    except (ValueError, AttributeError, TypeError, IndexError):
+        reason = ""
+    if not reason:
+        text = f"{exc} {content}"
+        reason = next((r for r in _KNOWN_REASONS if r in text), "")
+
+    def make(kind: str, retryable: bool, stops: bool) -> YouTubeApiError:
+        return YouTubeApiError(kind=kind, status=status, reason=reason, retryable=retryable, stops_monitoring=stops)
+
+    if reason in ("quotaExceeded", "dailyLimitExceeded"):
+        return make("quota", False, True)
+    if reason in ("rateLimitExceeded", "userRateLimitExceeded") or status == 429:
+        return make("rate_limited", True, False)
+    if reason in ("liveChatEnded", "liveChatDisabled", "liveChatNotFound") or status == 404:
+        return make("chat_ended", False, True)
+    if status == 401 or reason == "authError":
+        return make("auth", False, True)
+    if status == 403:
+        return make("forbidden", False, False)
+    if status == 400 or reason in ("messageTextInvalid", "messageTooLong"):
+        return make("invalid", False, False)
+    return make("transient", True, False)
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -43,6 +104,8 @@ class YouTubeService:
         self._nonessential_insert_cap = 60
         self._nonessential_warning_at = 48
         self._nonessential_warning_logged = False
+        # The most recent send failure (None after a successful send), read by ChatMonitor.
+        self.last_send_error: Optional[YouTubeApiError] = None
         self._setup_credentials()
 
     def _validate_json_string(self, json_string: str, var_name: str) -> Optional[dict]:
@@ -181,6 +244,7 @@ class YouTubeService:
 
     def send_message(self, live_chat_id: str, message: str, *, message_kind: str = "reply") -> bool:
         """Blocking call to send a message; run via thread in async context."""
+        self.last_send_error = None
         nonessential = message_kind in {"idle", "welcome"}
         if nonessential and self._nonessential_insert_count >= self._nonessential_insert_cap:
             logger.warning("Non-essential insert cap (%d) reached; suppressing %s message", self._nonessential_insert_cap, message_kind)
@@ -204,10 +268,16 @@ class YouTubeService:
                 if self._nonessential_insert_count >= self._nonessential_warning_at and not self._nonessential_warning_logged:
                     self._nonessential_warning_logged = True
                     logger.warning("Non-essential insert usage is at 80%% of the %d-call cap", self._nonessential_insert_cap)
-            logger.info(f"✅ Message sent: {message[:50]}...")
+            logger.info("✅ YouTube message sent (%s, %d chars)", message_kind, len(message))
             return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to send message: {e}")
-            logger.error(f"Message was: {message}")
+            err = classify_youtube_error(e)
+            self.last_send_error = err
+            # Context for diagnosis, but never the message text itself.
+            logger.log(
+                logging.ERROR if err.stops_monitoring else logging.WARNING,
+                "event=youtube_send_failed kind=%s status=%s reason=%s retryable=%s message_kind=%s chars=%d",
+                err.kind, err.status, err.reason or "-", str(err.retryable).lower(), message_kind, len(message),
+            )
             return False

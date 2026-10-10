@@ -9,6 +9,8 @@ import random
 import time
 from typing import Any, Awaitable, Callable, Optional, Union
 
+from services.youtube_service import YouTubeApiError, classify_youtube_error
+
 logger = logging.getLogger(__name__)
 
 ConfigType = Union[dict, object, None]
@@ -58,6 +60,7 @@ class ChatMonitor:
             ]
         self._last_activity_at = time.monotonic()
         self._last_idle_message_at = 0.0
+        self.last_error: Optional[str] = None  # "<poll|send>:<kind>:<reason>", shown by /yt_status
 
     def _cfg(self, key: str, default: Any = None) -> Any:
         if self.config is None:
@@ -102,6 +105,7 @@ class ChatMonitor:
             logger.warning("Start rejected: an existing monitor task is active or stopping")
             return False
         self.live_chat_id, self.video_id = live_chat_id, video_id
+        self.last_error = None
         self.is_running = True
         self.next_page_token = None
         self.processed_messages.clear()
@@ -155,16 +159,12 @@ class ChatMonitor:
             "session_id": self.stream_session_id,
             "processed_count": len(self.processed_messages),
             "ai_cooldown_remaining": self.ai.get_cooldown_remaining() if hasattr(self.ai, "get_cooldown_remaining") else 0,
-            "subscribers_count": len(self.subscribers)
+            "subscribers_count": len(self.subscribers),
+            "last_error": self.last_error,
         }
 
-    @staticmethod
-    def _is_quota_exhausted(exc: Exception) -> bool:
-        status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
-        content = getattr(exc, "content", b"")
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", "replace")
-        return status == 403 and "quotaExceeded" in (str(exc) + str(content))
+    def _record_api_error(self, source: str, err: YouTubeApiError) -> None:
+        self.last_error = f"{source}:{err.kind}:{err.reason or err.status or '-'}"
 
     def _set_poll_delay(self, response: dict[str, Any]) -> None:
         hint = response.get("pollingIntervalMillis")
@@ -195,13 +195,22 @@ class ChatMonitor:
 
         try:
             sent = await asyncio.to_thread(self.youtube.send_message, self.live_chat_id, text, message_kind=message_kind)
-            if sent:
-                self._last_activity_at = time.monotonic()
-            await asyncio.sleep(self._send_cooldown)
-            return bool(sent)
         except Exception:
             logger.exception("Could not send chat message")
             return False
+        if sent:
+            self._last_activity_at = time.monotonic()
+        else:
+            err = getattr(self.youtube, "last_send_error", None)
+            if isinstance(err, YouTubeApiError):
+                self._record_api_error("send", err)
+                if err.stops_monitoring:
+                    # e.g. the live chat ended or quota/auth failed: no later send can work.
+                    logger.error("YouTube send failed permanently (%s); stopping chat monitor", self.last_error)
+                    self.stop_monitoring()
+                    return False
+        await asyncio.sleep(self._send_cooldown)
+        return bool(sent)
 
     async def send_chat_message_with_retry(self, text: str, retries: int = 1, retry_delay: float = 1.0, *, message_kind: str = "reply") -> bool:
         for attempt in range(retries + 1):
@@ -241,8 +250,13 @@ class ChatMonitor:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            if self._is_quota_exhausted(exc):
-                logger.error("YouTube quota exhausted; monitoring stops without retry")
+            err = classify_youtube_error(exc)
+            self._record_api_error("poll", err)
+            if err.stops_monitoring:
+                if err.kind == "quota":
+                    logger.error("YouTube quota exhausted; monitoring stops without retry")
+                else:
+                    logger.error("YouTube polling failed permanently (%s); monitoring stops without retry", self.last_error)
                 self.stop_monitoring()
                 # A task that cancels itself must reach an await point to
                 # receive (and let _monitor_loop handle) CancelledError.
