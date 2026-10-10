@@ -400,25 +400,33 @@ class RukiyaCog(commands.Cog):
         orch = getattr(self.bot, "orchestrator", None)
         ai = getattr(self.bot, "ai_service", None)
         reply = None
-        if isinstance(orch, RukiyaOrchestrator):
-            reply = await orch.process_raw_text(
-                question,
-                author=interaction.user.display_name,
-                platform="discord",
-                user_id=str(interaction.user.id),
-                bypass_trigger=True,
-                bypass_cooldown=True
+        try:
+            if isinstance(orch, RukiyaOrchestrator):
+                reply = await orch.process_raw_text(
+                    question,
+                    author=interaction.user.display_name,
+                    platform="discord",
+                    user_id=str(interaction.user.id),
+                    bypass_trigger=True,
+                    bypass_cooldown=True
+                )
+            elif ai and hasattr(ai, "generate_response"):
+                reply = await ai.generate_response(
+                    question,
+                    interaction.user.display_name,
+                    bypass_trigger=True,
+                    bypass_cooldown=True
+                )
+            else:
+                # Legacy direct call only when no pipeline is wired up (see on_message).
+                reply = await self.generate_reply(question, author=interaction.user.display_name)
+        except Exception:
+            logger.exception("/ask pipeline failed")
+            await interaction.followup.send(
+                "❌ Something went wrong while Rukiya was answering. Please try again later.",
+                ephemeral=True,
             )
-        elif ai and hasattr(ai, "generate_response"):
-            reply = await ai.generate_response(
-                question,
-                interaction.user.display_name,
-                bypass_trigger=True,
-                bypass_cooldown=True
-            )
-        else:
-            # Legacy direct call only when no pipeline is wired up (see on_message).
-            reply = await self.generate_reply(question, author=interaction.user.display_name)
+            return
 
         if not reply:
             await interaction.followup.send(

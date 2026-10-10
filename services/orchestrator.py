@@ -20,7 +20,7 @@ from services.identity_service import IdentityService
 from services.memory_service import MemoryService
 from services.models import ChatMessage, GeneratedResponse, ResponseDecision, UserIdentity
 from services.rate_limiter import RateLimiter
-from services.safety_service import SafetyService
+from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, SafetyService
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +188,10 @@ class RukiyaOrchestrator:
         # 11. Record Assistant Message & Extract Facts
         self.memory_service.record_interaction(user, generated.text, role="assistant")
 
-        # Extract persistent and stream facts from user's message
-        self.memory_service.extract_and_store_facts(user, message.text)
+        # Extract persistent and stream facts from user's message. Serious messages are
+        # skipped: "I am suicidal" must never become a remembered name or preference.
+        if decision.intent not in SERIOUS_INTENT_INSTRUCTIONS:
+            self.memory_service.extract_and_store_facts(user, message.text)
 
         # Mark user as welcomed in stream if intent was greeting
         if not user.is_welcomed_in_stream and decision.intent == "greeting":

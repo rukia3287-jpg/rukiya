@@ -50,9 +50,10 @@ PROMPT_INJECTION_PATTERNS = [
 # Persona violations and unsafe terms
 UNSAFE_OUTPUT_PATTERNS = [
     r"\*[^*]+\*",  # Stage directions: *smiles*, *sighs*
-    # Stage directions in brackets: (smiles), [laughs], (crosses arms). Ordinary
-    # parentheticals such as "(PS5 only)" are left alone.
-    r"[\(\[]\s*(?:she\s+)?(?:sighs?|smiles?|smirks?|grins?|laughs?|giggles?|chuckles?|snickers?|blush(?:es)?|nods?|winks?|shrugs?|pouts?|huffs?|yawns?|gasps?|scoffs?|frowns?|glares?|facepalms?|coughs?|whispers?|mutters?|waves?|bows?|sips?|crosses (?:her |my )?arms|rolls (?:her |my )?eyes)\b[^\)\]]*[\)\]]",
+    # Stage directions in brackets: (smiles), [laughs], (crosses arms), (Rukiya smiles softly).
+    # The whole bracket must be an action phrase, so "(PS5 only)", "(Wave 3)" or
+    # "(bows are OP)" pass. Bounded repetition keeps matching linear.
+    r"[\(\[]\s*(?:(?:she|rukiya|rukia)\s+)?(?:sigh|smil|smirk|grin|laugh|giggl|chuckl|snicker|blush|nod|wink|shrug|pout|huff|yawn|gasp|scoff|frown|glar|facepalm|cough|whisper|mutter|wav|bow|sip|cross|roll|look|star|tilt)(?:e|es|s|ing|ning|ding|ping)?(?:\s+(?:softly|quietly|nervously|awkwardly|slightly|smugly|deeply|loudly|again|away|back|her|his|my|a|bit|little|arms|eyes|head|at|chat|you)){0,3}\s*[\)\]]",
     r"\b(?:uwu|idiot|dumbass|stupid|kill|hate you)\b",
     r"\b(?:bitch|fucker|motherfucker|nigger|nigga|faggot|retard|cunt)\b",
     r"\b(?:die|murder|suicide)\b",
@@ -75,14 +76,15 @@ FALLBACK_INTENTS: Dict[str, str] = {
 
 # Generation guidance for serious messages, shared by the AI engine and legacy AIService.
 SERIOUS_INTENT_INSTRUCTIONS: Dict[str, str] = {
+    # One sentence on purpose: the output validator keeps only the first sentence.
     "sensitive": (
         "The viewer is going through something serious. Drop all teasing and persona snark; "
-        "reply with calm, genuine care in one or two short sentences."
+        "reply with calm, genuine care in one short sentence."
     ),
     "crisis": (
-        "The viewer may be in crisis. Drop all teasing and persona snark; reply with calm, genuine care "
-        "in one or two short sentences and gently encourage them to reach out to someone they trust "
-        "or a local crisis helpline."
+        "The viewer may be in crisis. Drop all teasing and persona snark; in one short sentence, "
+        "respond with calm, genuine care and gently encourage them to reach out to someone they "
+        "trust or a local crisis helpline."
     ),
 }
 

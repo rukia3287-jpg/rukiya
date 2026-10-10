@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from services.ai_engine.models import AIEngineRequest, CostClass, Plan, SearchQuery
 from services.config import Config
+from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,10 @@ class Planner:
             and not is_casual_conversation
         )
         search_required = freshness_required or explicit_search
+        # Serious messages never go to web search and keep their intent, so a word like
+        # "tonight" or "news" cannot strip the caring instruction and fallbacks.
+        if request.intent in SERIOUS_INTENT_INSTRUCTIONS:
+            freshness_required = explicit_search = search_required = False
 
         # 2. Determine Memory Requirement
         personal_pronouns = any(p in text_lower.split() for p in ["my", "me", "i", "mine"])

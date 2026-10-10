@@ -100,6 +100,48 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interaction.followup.send.call_args[1].get("ephemeral"))
         self.assertIsNone(interaction.followup.send.call_args[1].get("embed"))
 
+    async def test_slash_ask_reports_pipeline_errors_instead_of_hanging(self):
+        interaction = FakeInteraction(user_name="Viewer")
+        orch = MagicMock(spec=RukiyaOrchestrator)
+        orch.process_raw_text = AsyncMock(side_effect=RuntimeError("database exploded"))
+        self.bot.orchestrator = orch
+
+        await self.chat_cog.slash_ask.callback(self.chat_cog, interaction, question="hello")
+
+        interaction.followup.send.assert_awaited_once()
+        self.assertTrue(interaction.followup.send.call_args[1].get("ephemeral"))
+        self.assertNotIn("database exploded", interaction.followup.send.call_args[0][0])
+
+    async def test_welcome_send_requires_administrator(self):
+        from cogs.welcome import Welcome
+        cog = Welcome(self.bot)
+        cm_mock = MagicMock()
+        cm_mock.is_running = True
+        cm_mock.send_chat_message = AsyncMock(return_value=True)
+        self.bot.chat_monitor = cm_mock
+
+        member = FakeInteraction(user_name="Viewer", is_admin=False)
+        await cog.welcome_send.callback(cog, member, text="@everyone free nitro")
+        cm_mock.send_chat_message.assert_not_called()
+        member.response.send_message.assert_awaited_once()
+        self.assertTrue(member.response.send_message.call_args[1].get("ephemeral"))
+
+        admin = FakeInteraction(user_name="Admin", is_admin=True)
+        await cog.welcome_send.callback(cog, admin, text="Welcome everyone!")
+        cm_mock.send_chat_message.assert_awaited_once()
+
+    async def test_welcome_send_discord_echo_cannot_ping_everyone(self):
+        from cogs.welcome import Welcome
+        cog = Welcome(self.bot)
+        self.bot.chat_monitor = None
+        admin = FakeInteraction(user_name="Admin", is_admin=True)
+
+        await cog.welcome_send.callback(cog, admin, text="@everyone hi")
+
+        allowed = admin.followup.send.call_args[1].get("allowed_mentions")
+        self.assertIsNotNone(allowed)
+        self.assertFalse(allowed.everyone)
+
     async def test_slash_ask_yt_posting_refused_for_non_admin(self):
         await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", is_admin=False))
 

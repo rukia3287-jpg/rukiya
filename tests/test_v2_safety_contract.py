@@ -18,22 +18,44 @@ from services.ai_engine.providers.base import AIProvider
 from services.ai_service import RUKIYA_SYSTEM_PROMPT as LEGACY_SYSTEM_PROMPT
 from services.config import Config
 from services.decision_service import DecisionService
-from services.safety_service import FALLBACK_INTENTS, SafetyService, validate_rukiya_response
+from services.ai_engine.planner import Planner
+from services.safety_service import (
+    FALLBACK_INTENTS,
+    SERIOUS_INTENT_INSTRUCTIONS,
+    SafetyService,
+    validate_rukiya_response,
+)
 
 CRISIS_MESSAGES = [
     "i want to kill myself",
     "rukiya I keep thinking about suicide",
     "honestly I just want to die",
+    "I wanna die",
     "I've been self harming again",
     "hi rukiya, I don't want to live anymore",
+    "I'm suicidal",
+    "im sucidal",
+    "kms",
+    "I want to unalive myself",
+    "I wish I was dead",
+    "I'm going to end it tonight",
+    "nobody would miss me",
+    "mujhe marna hai",
+    "main mar jaunga",
+    "zindagi se thak gaya hu",
 ]
 SENSITIVE_MESSAGES = [
     "I'm so depressed lately",
     "my dog passed away this morning",
+    "my mom died last week",
     "I'm having a panic attack",
     "I feel completely hopeless",
     "hey rukiya I'm having a really bad day",
     "why do I feel so worthless?",
+    "I'm so lonely",
+    "I'm struggling with depression",
+    "feeling really down today",
+    "I'm not okay",
 ]
 ORDINARY_MESSAGES = [
     "hello everyone",
@@ -42,6 +64,23 @@ ORDINARY_MESSAGES = [
     "what game is this?",
     "you're so cute rukiya",
     "I'm dying of laughter",
+    "kill myself laughing at that clip",
+    "this game makes me want to die lol",
+    "that boss is suicide",
+    "Suicide Squad is mid",
+    "that was a suicide mission",
+    "we're going to die lol",
+    "end it all, ff at 15",
+    "hurt myself laughing",
+    "cutting myself on this paper",
+    "I'm down to play",
+    "I'm so down for that",
+    "I'm not ok with that nerf",
+    "I'm empty on ammo",
+    "not a bad day at all",
+    "lonely planet guide",
+    "depression era graphics",
+    "the market depression arc",
 ]
 FLIPPANT_MARKERS = ("reckless", "tch", "don't get used", "keep it friendly", "civil", "focus on the stream")
 
@@ -107,8 +146,66 @@ class SeriousMessageTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(intent=intent):
                 req = AIEngineRequest(text="I feel hopeless", author="viewer", intent=intent)
                 instruction = compiler.compile(req, Plan(intent=intent))[-1]["content"]
-                self.assertIn("Drop all teasing", instruction)
+                self.assertIn(SERIOUS_INTENT_INSTRUCTIONS[intent], instruction)
                 self.assertIn("same language", instruction)
+
+    def test_crisis_guidance_fits_the_one_sentence_output_limit(self):
+        # validate_rukiya_response keeps only the first sentence, so the helpline
+        # nudge must be requested inside that one sentence, not after it.
+        crisis = SERIOUS_INTENT_INSTRUCTIONS["crisis"]
+        self.assertIn("one short sentence", crisis)
+        self.assertIn("helpline", crisis)
+        self.assertNotIn("two", crisis)
+
+    def test_planner_keeps_serious_intents_and_never_searches_them(self):
+        planner = Planner(self.config)
+        for text in ("rukiya I want to kill myself this week", "I feel hopeless tonight", "bad news, my cat passed away today"):
+            intent = self.decision.detect_intent(text)
+            with self.subTest(text=text):
+                self.assertIn(intent, ("crisis", "sensitive"))
+                plan = planner.plan(AIEngineRequest(text=text, author="viewer", intent=intent))
+                self.assertEqual(plan.intent, intent)
+                self.assertFalse(plan.search_required)
+                self.assertFalse(plan.freshness_required)
+
+    async def test_serious_message_flows_from_text_to_caring_prompt_without_search(self):
+        text = "rukiya I want to kill myself this week"
+        intent = self.decision.detect_intent(text)
+        openrouter, gemini = StubProvider("openrouter"), StubProvider("gemini")
+        openrouter.generate_mock.return_value = AIProviderResult(text="I'm here with you, so please talk to someone you trust.", provider="openrouter")
+        registry = ProviderRegistry(self.config)
+        registry.register(openrouter)
+        registry.register(gemini)
+        engine = AIEngine(config=self.config, registry=registry)
+
+        await engine.process(AIEngineRequest(text=text, author="viewer", user_id="v", intent=intent))
+
+        gemini.search_mock.assert_not_awaited()
+        prompt = openrouter.generate_mock.call_args[0][0][-1]["content"]
+        self.assertIn(SERIOUS_INTENT_INSTRUCTIONS["crisis"], prompt)
+
+    async def test_serious_messages_are_not_mined_for_profile_facts(self):
+        import os
+        import shutil
+        import tempfile
+        from services.memory_service import MemoryService
+        from services.models import ChatMessage
+        from services.orchestrator import RukiyaOrchestrator
+        from services.ai_engine.models import AIEngineResult
+
+        db_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, db_dir, True)
+        config = Config(db_path=os.path.join(db_dir, "facts.db"))
+        memory = MemoryService(config)
+        engine = AsyncMock()
+        engine.process = AsyncMock(return_value=AIEngineResult(text="Please talk to someone you trust.", provider="openrouter"))
+        orchestrator = RukiyaOrchestrator(config=config, memory_service=memory, ai_engine=engine)
+
+        message = ChatMessage(platform="discord", message_id="m1", user_id="123456789012345678",
+                              username="viewer", display_name="Viewer", text="rukiya I am suicidal")
+        await orchestrator.process_message(message, bypass_trigger=True, bypass_cooldown=True)
+
+        self.assertEqual(memory.get_all_user_memories("discord:123456789012345678"), [])
 
     async def test_blocked_reply_to_a_crisis_message_falls_back_to_care_not_snark(self):
         openrouter, gemini = StubProvider("openrouter"), StubProvider("gemini")
@@ -145,12 +242,19 @@ class SeriousMessageTests(unittest.IsolatedAsyncioTestCase):
 
 class StageDirectionTests(unittest.TestCase):
     def test_bracketed_stage_directions_are_rejected(self):
-        for reply in ("(smiles) Welcome in.", "[laughs] Nice try.", "Fine (sighs).", "(crosses arms) Hmph.", "[rolls eyes] Sure."):
+        for reply in (
+            "(smiles) Welcome in.", "[laughs] Nice try.", "Fine (sighs).", "(crosses arms) Hmph.", "[rolls eyes] Sure.",
+            "(smiling) Welcome in.", "(laughing) Fine.", "(sighing) Okay.", "(nodding) Sure.", "(looks away) Whatever.",
+            "(Rukiya smiles) Hi.", "(smiles softly) Welcome back.", "(waves at chat) Hello.",
+        ):
             with self.subTest(reply=reply):
                 self.assertEqual(validate_rukiya_response(reply, fallback="FALLBACK"), "FALLBACK")
 
     def test_ordinary_parentheses_are_kept(self):
-        for reply in ("Try hard mode (PS5 only).", "Welcome in (finally).", "That boss has two phases (maybe three)."):
+        for reply in (
+            "Try hard mode (PS5 only).", "Welcome in (finally).", "That boss has two phases (maybe three).",
+            "Hold out until (Wave 3).", "Pick the ranged class (bows are OP).", "Buy potions (sips are cheap).",
+        ):
             with self.subTest(reply=reply):
                 self.assertEqual(validate_rukiya_response(reply, fallback="FALLBACK"), reply)
 

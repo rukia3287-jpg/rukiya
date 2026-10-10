@@ -72,29 +72,44 @@ class DecisionService:
     # Intent Detection
     # ─────────────────────────────────────────────────────────────
     # Serious messages are classified first, so "hi rukiya, I feel hopeless" is not a greeting.
+    # Patterns favour first-person phrasing, and an immediately following laughter marker
+    # ("kill myself laughing", "want to die lol") reads as gaming hyperbole, not distress.
+    _JOKE = r"(?!\s*(?:laughing|lol|lmao|lmfao|haha\w*|xd|jk)\b)"
     CRISIS_PATTERNS = (
-        r"\bkill(?:ing)? myself\b",
-        r"\bsuicid(?:e|al)\b",
-        r"\b(?:want|wanna|going) to die\b",
-        r"\bend (?:my life|it all)\b",
+        r"\bkill(?:ing)? myself\b" + _JOKE,
+        r"\bkms\b" + _JOKE,
+        r"\bunalive (?:myself|me)\b",
+        r"\bsui?cidal\b",
+        r"\b(?:commit(?:ting)?|thinking (?:about|of)|thoughts of|attempt(?:ed|ing)?|considering|contemplating) suicide\b",
+        r"\b(?:want|wants|wanted) to die\b" + _JOKE,
+        r"\bwanna die\b" + _JOKE,
+        r"\bwish (?:that )?i (?:was|were) dead\b",
+        r"\bend my life\b",
+        r"\bi(?:'m| am)? (?:want(?: to)?|wanna|need to|going to|gonna|will) end (?:it all|it tonight|everything)\b",
         r"\bself[- ]?harm(?:ing)?\b",
-        r"\b(?:hurt|hurting|cut|cutting) myself\b",
+        r"\b(?:hurt|hurting|cut|cutting) myself\b(?!\s+(?:on|with|while|by accident|accidentally|laughing|lol|lmao)\b)",
         r"\bdon'?t want to (?:live|be alive|exist)\b",
         r"\bno reason to live\b",
-        r"\b(?:marna|mar jana) chaht[ai]\b",
+        r"\b(?:nobody|no one|noone) would (?:miss|care about) me\b",
+        r"\bmarna (?:hai|chahta|chahti)\b",
+        r"\bmar jaung[ai]\b",
         r"\bjeena nahi chaht[ai]\b",
+        r"\bzindagi se thak (?:gaya|gayi|chuka|chuki)\b",
     )
     SENSITIVE_PATTERNS = (
-        r"\bdepress(?:ed|ion)\b",
+        r"\bdepressed\b" + _JOKE,
+        r"\b(?:my|have|having|with|fighting|battling) depression\b",
         r"\b(?:panic|anxiety) attacks?\b",
-        r"\bhopeless\b",
-        r"\bworthless\b",
-        r"\blonely\b",
-        r"\b(?:passed away|funeral|grieving)\b",
-        r"\bbad day\b",
+        r"\b(?:i(?:'m| am)?|feel(?:ing)?|so) (?:so |really |completely |totally )?(?:hopeless|worthless)\b",
+        r"\b(?:i(?:'m| am)|i feel|feeling|so|very|really) lonely\b",
+        r"\bpassed away\b",
+        r"\b(?:funeral|grieving)\b",
+        r"\bmy (?:mom|mum|mother|dad|father|grandma|grandpa|grandmother|grandfather|brother|sister|best friend|friend|dog|cat|pet|wife|husband|son|daughter|uncle|aunt) (?:just )?(?:died|is dead|passed)\b",
+        r"\b(?:having|had|such) a (?:really |very |super )?(?:bad|rough|terrible|awful) day\b",
         r"\bheart ?broken\b",
-        r"\b(?:i'?m|i am|feeling|feel) (?:so |really |very )?(?:sad|down|miserable|empty)\b",
-        r"\bi'?m not (?:okay|ok)\b",
+        r"\b(?:i(?:'m| am)|i feel|feeling) (?:so |really |very )?(?:sad|miserable)\b" + _JOKE,
+        r"\bfeeling (?:so |really |very )?(?:down|low|empty)\b",
+        r"\bi(?:'m| am) not (?:okay|ok)\b(?!\s+with)",
         r"\b(?:udaas|dukhi)\b",
     )
     URGENT_INTENTS = frozenset({"help", "crisis", "sensitive"})

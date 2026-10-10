@@ -1,11 +1,14 @@
 # cogs/welcome.py
 import asyncio
 import logging
+import re
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from services.safety_service import validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +40,13 @@ class Welcome(commands.Cog):
 
             cm = getattr(self.bot, "chat_monitor", None)
             if cm and cm.is_running:
-                welcome_msg = f"Welcome {member.display_name}! 🎉"
+                # Display names are untrusted input: keep only plain name characters.
+                safe_name = re.sub(r"[^\w .\-]", "", member.display_name)[:32].strip() or "friend"
+                welcome_msg = f"Welcome {safe_name}! 🎉"
                 if self.ai:
                     try:
                         maybe = await self.ai.generate_response(
-                            f"Write a friendly short welcome for {member.display_name}",
+                            f"Write a friendly short welcome for {safe_name}",
                             "welcome-bot",
                             bypass_trigger=True,
                             bypass_cooldown=True,
@@ -51,6 +56,7 @@ class Welcome(commands.Cog):
                     except Exception:
                         logger.exception("AI generation for welcome failed")
 
+                welcome_msg = validate_rukiya_response(welcome_msg, fallback="Welcome to the community! 🎉")
                 try:
                     await cm.send_chat_message(welcome_msg, message_kind="welcome")
                 except Exception:
@@ -62,6 +68,13 @@ class Welcome(commands.Cog):
     @app_commands.command(name="welcome_send", description="Send a manual welcome message to YouTube chat (or Discord fallback)")
     @app_commands.describe(text="Text to send (if empty, AI or default will be used)")
     async def welcome_send(self, interaction: discord.Interaction, text: Optional[str] = None):
+        if not interaction.guild or not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Only server administrators can send welcome messages.",
+                ephemeral=True,
+            )
+            return
+
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer(thinking=True)
@@ -77,6 +90,8 @@ class Welcome(commands.Cog):
                     bypass_trigger=True,
                     bypass_cooldown=True,
                 )
+                if text:
+                    text = validate_rukiya_response(text, fallback="Welcome everyone! 🎉")
             if not text:
                 text = "Welcome everyone! 🎉"
 
@@ -90,7 +105,7 @@ class Welcome(commands.Cog):
                 logger.exception("Failed to send welcome to YouTube")
 
         try:
-            await interaction.followup.send(f"📣 Welcome: {text}")
+            await interaction.followup.send(f"📣 Welcome: {text}", allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             logger.exception("Failed to send welcome fallback message")
 
