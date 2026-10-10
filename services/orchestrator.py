@@ -17,6 +17,7 @@ from services.ai_service import AIService
 from services.config import Config
 from services.decision_service import DecisionService
 from services.identity_service import IdentityService
+from services.jev_adapter import JevDecisionAdapter
 from services.memory_service import MemoryService
 from services.models import ChatMessage, GeneratedResponse, ResponseDecision, UserIdentity
 from services.rate_limiter import RateLimiter
@@ -39,6 +40,7 @@ class RukiyaOrchestrator:
         rate_limiter: Optional[RateLimiter] = None,
         ai_service: Optional[AIService] = None,
         ai_engine: Optional[AIEngine] = None,
+        jev_adapter: Optional[JevDecisionAdapter] = None,
     ):
         self.config = config or Config()
         self.memory_service = memory_service or MemoryService(self.config)
@@ -48,6 +50,7 @@ class RukiyaOrchestrator:
         self.rate_limiter = rate_limiter or RateLimiter(self.config)
         self.ai_service = ai_service or AIService(self.config)
         self.ai_engine = ai_engine
+        self.jev_adapter = jev_adapter or JevDecisionAdapter(self.config)
 
     async def process_message(
         self,
@@ -87,6 +90,60 @@ class RukiyaOrchestrator:
             bypass_trigger=bypass_trigger,
             bypass_cooldown=bypass_cooldown
         )
+
+        # JEV is an optional strategy signal. Hard denials and unsafe inputs never reach it.
+        if self.jev_adapter.enabled and decision.intent not in {"ignored", "spam"}:
+            recommendation = await self.jev_adapter.recommend(
+                message=message,
+                user=user,
+                decision=decision,
+                recent_messages=recent_messages,
+                memory_available=bool(persistent_memory or session_context),
+            )
+            if recommendation is not None:
+                baseline_should_respond = decision.should_respond
+                if self.jev_adapter.mode == "shadow":
+                    logger.info(
+                        "event=jev_shadow_decision baseline_should_respond=%s probability=%.3f mode=%s tone=%s length=%s latency_ms=%.1f",
+                        baseline_should_respond,
+                        recommendation.response_probability,
+                        recommendation.conversation_mode,
+                        recommendation.tone,
+                        recommendation.reply_length,
+                        recommendation.latency_ms,
+                    )
+                elif self.jev_adapter.mode == "active":
+                    extra = dict(decision.extra or {})
+                    is_direct = bool(extra.get("is_direct_mention")) or bypass_trigger
+                    is_urgent = self.decision_service.is_urgent_intent(decision.intent)
+                    if not is_direct and not is_urgent:
+                        if recommendation.response_probability >= self.jev_adapter.respond_threshold:
+                            decision.should_respond = True
+                            decision.response_mode = "personality"
+                            decision.priority = max(float(decision.priority), 0.55)
+                        elif recommendation.response_probability <= self.jev_adapter.ignore_threshold:
+                            decision.should_respond = False
+                            decision.response_mode = "ignore"
+
+                    extra["jev_response_probability"] = recommendation.response_probability
+                    if decision.should_respond:
+                        extra["conversation_strategy"] = recommendation.as_prompt_dict()
+                        if (
+                            recommendation.conversation_mode in {"answer", "follow_up"}
+                            and (persistent_memory or session_context)
+                        ):
+                            decision.memory_needed = True
+                    decision.extra = extra
+                    logger.info(
+                        "event=jev_decision_applied baseline_should_respond=%s final_should_respond=%s probability=%.3f mode=%s tone=%s length=%s latency_ms=%.1f",
+                        baseline_should_respond,
+                        decision.should_respond,
+                        recommendation.response_probability,
+                        recommendation.conversation_mode,
+                        recommendation.tone,
+                        recommendation.reply_length,
+                        recommendation.latency_ms,
+                    )
 
         logger.info(
             "event=decision should_respond=%s intent=%s priority=%.2f reason='%s'",
@@ -136,6 +193,7 @@ class RukiyaOrchestrator:
                     persistent_memory=persistent_memory if decision.memory_needed else None,
                     stream_memory=session_context if decision.memory_needed else None,
                     recent_messages=recent_messages,
+                    conversation_strategy=(decision.extra or {}).get("conversation_strategy"),
                 )
                 engine_res = await self.ai_engine.process(engine_req)
                 generated = GeneratedResponse(
@@ -238,11 +296,18 @@ class RukiyaOrchestrator:
             "ai_last_used": self.ai_service.last_used,
             "ai_cooldown_remaining": self.ai_service.get_cooldown_remaining(),
             "global_ai_tokens": self.rate_limiter.get_remaining("global_ai"),
-            "model": self.ai_service.model
+            "model": self.ai_service.model,
+            "jev_mode": self.jev_adapter.mode,
+            "jev_configured": self.jev_adapter.configured,
+            "jev_active": self.jev_adapter.enabled and self.jev_adapter.mode == "active",
         }
 
     async def aclose(self) -> None:
-        """Gracefully shut down AI Engine, AI service, and underlying resources."""
+        """Gracefully shut down JEV and the existing AI generation resources."""
+        try:
+            await self.jev_adapter.aclose()
+        except Exception:
+            logger.exception("event=jev_shutdown_failed")
         if self.ai_engine is not None and hasattr(self.ai_engine, "aclose"):
             await self.ai_engine.aclose()
         elif hasattr(self.ai_service, "close"):

@@ -97,6 +97,14 @@ Configure these variables in your `.env` file or hosting environment (e.g. Rende
 | `GEMINI_MODEL` | Gemini model with search grounding | `gemini-3.5-flash-lite` | No |
 | `GEMINI_SEARCH_ENABLED` | Enable Google Search grounding | `true` | No |
 | `GEMINI_SEARCH_DAILY_LIMIT` | Daily cap on dispatched grounded searches | `450` | No |
+| `JEV_API_KEY` | Server-side key for Jev AI typed-decision API; required only when JEV mode is enabled | - | Conditional |
+| `JEV_CONVERSATION_MODE` | `disabled`, `shadow` (log recommendations only), or `active` | `disabled` | No |
+| `JEV_MODEL` | JEV decision model | `jev-1.13` | No |
+| `JEV_API_ENDPOINT` | Jev AI decision endpoint, including trailing slash | `https://jev-ai.org/api/v1/systemone/` | No |
+| `JEV_TIMEOUT` | Maximum seconds to wait for a JEV decision | `3` | No |
+| `JEV_MAX_CALLS_PER_MINUTE` | Application-level cap on JEV requests to control latency and usage | `12` | No |
+| `JEV_RESPOND_THRESHOLD` | Probability needed for JEV to invite a non-direct response | `0.72` | No |
+| `JEV_IGNORE_THRESHOLD` | Probability below which JEV may silence non-direct, non-urgent chatter | `0.20` | No |
 | `GEMINI_SEARCH_CACHE_TTL` | Search result cache TTL (seconds) | `300` | No |
 | `CLIENT_SECRET_JSON` | Google OAuth client secret (JSON string), read by the YouTube service | - | For YouTube |
 | `TOKEN_JSON` | Google OAuth authorized-user token (JSON string), read by the YouTube service | - | For YouTube |
@@ -133,6 +141,25 @@ Configure these variables in your `.env` file or hosting environment (e.g. Rende
 
 Invalid numeric values are ignored per variable (a warning names the variable and the default is kept), so one typo no longer resets unrelated settings.
 `AI_MAX_PLANNER_STEPS`, `CHAT_CHECK_INTERVAL`, `CRITIC_TIMEOUT`, `REPAIR_TIMEOUT`, `BOT_NAME` and `YOUTUBE_VIDEO_ID` are parsed but currently not used by any code path (`/start` takes the video ID as an argument).
+
+---
+
+### 🎭 Adaptive Conversation Strategy (JEV)
+
+Rukiya can optionally use Jev AI as a typed **decision layer**, not as a reply generator. JEV evaluates one bounded chat state and returns structured recommendations for whether to respond, the conversation mode, tone, and reply length. The existing `DecisionService` still enforces hard eligibility rules, direct mentions and urgent messages retain their precedence, the existing rate limiter/safety/anti-repetition paths remain active, and the current OpenRouter/Gemini AI stack writes the actual reply.
+
+JEV is **disabled by default**. The Jev AI API is an external service and successful decision calls consume the key's usage/balance. The bot sends the current message and a bounded recent-chat window for decision-making; it does not send viewer account IDs or stored memory contents to JEV.
+
+Configure these variables in the host's secret/environment settings (Render, local `.env`, etc.):
+
+- `JEV_API_KEY`: server-side Jev AI API key. Never commit it.
+- `JEV_CONVERSATION_MODE=shadow`: ask JEV and log sanitized comparisons, but keep the current decision path authoritative. **Shadow calls still use API balance.**
+- `JEV_CONVERSATION_MODE=active`: let validated JEV recommendations affect participation and response style, subject to all existing deterministic enforcement.
+- `JEV_CONVERSATION_MODE=disabled`: restore the existing behaviour immediately.
+
+Start with a low `JEV_MAX_CALLS_PER_MINUTE`, review logs for `event=jev_shadow_decision`, and only then enable active mode. When the key is missing, the request times out, the service returns an error, or its response violates the typed schema, Rukiya falls back to the existing deterministic decision. The code does not need an extra SDK: it uses the repository's existing `httpx` dependency.
+
+Installing a Jev coding-agent skill/CLI in an editor is not by itself enough to make a deployed bot use it; the bot needs the server-side API key and the environment flag in the runtime where Rukiya actually runs.
 
 ---
 

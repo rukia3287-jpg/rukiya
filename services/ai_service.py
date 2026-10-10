@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from services.config import Config
+from services.conversation_strategy import strategy_instruction
 from services.models import GeneratedResponse, MemoryEntry, ResponseDecision
 from services.language import detect_reply_language
 from services.safety_service import (
@@ -183,6 +184,12 @@ class AIService:
             prompt_instruction = "Welcome the viewer in character as Rukiya. 1 short sentence."
         elif decision and decision.intent == "compliment":
             prompt_instruction = "Respond to compliment with restrained, dry tsundere deflection. 1 short sentence."
+
+        # Only use values validated by the JEV adapter; serious-message instructions take precedence.
+        if decision and decision.intent not in SERIOUS_INTENT_INSTRUCTIONS:
+            strategy_hint = strategy_instruction((decision.extra or {}).get("conversation_strategy"))
+            if strategy_hint:
+                prompt_instruction += f"\n{strategy_hint}"
 
         current_content = f"{user_context_block}[Stream viewer '{author}' says]: {user_message}\n\n{prompt_instruction}"
         messages.append({"role": "user", "content": current_content})

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from services.ai_engine.models import AIEngineRequest, EvidenceItem, Plan
 from services.config import Config
+from services.conversation_strategy import strategy_instruction
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,12 @@ class ContextCompiler:
             "Preserve Roman/Latin script for Romanized language. Do not translate Romanized Indian languages into English. "
             "Answer the message; never return the same question or a near-verbatim echo as the response."
         )
+
+        # Adaptive strategy is mapped through local allowlists and never overrides serious-message handling.
+        if plan.intent not in SERIOUS_INTENT_INSTRUCTIONS:
+            strategy_hint = strategy_instruction(request.conversation_strategy)
+            if strategy_hint:
+                prompt_instruction += f"\n{strategy_hint}"
 
         if repair_instruction:
             prompt_instruction += f"\nCORRECTION REQUIRED: {repair_instruction}"

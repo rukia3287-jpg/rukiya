@@ -25,6 +25,16 @@ class Config:
     openrouter_model: str = "deepseek/deepseek-r1"
     openrouter_endpoint: str = "https://openrouter.ai/api/v1/chat/completions"
 
+    # Optional JEV adaptive conversation decisions (paid API; disabled by default)
+    jev_api_key: Optional[str] = None
+    jev_conversation_mode: str = "disabled"  # disabled | shadow | active
+    jev_model: str = "jev-1.13"
+    jev_api_endpoint: str = "https://jev-ai.org/api/v1/systemone/"
+    jev_timeout: float = 3.0
+    jev_max_calls_per_minute: int = 12
+    jev_respond_threshold: float = 0.72
+    jev_ignore_threshold: float = 0.20
+
     # Gemini & AI Engine settings
     gemini_api_key: Optional[str] = None
     gemini_model: str = "gemini-3.5-flash-lite"
@@ -126,6 +136,17 @@ class Config:
         if not self.gemini_api_key:
             self.gemini_api_key = os.getenv("GEMINI_API_KEY")
 
+        if not self.jev_api_key:
+            self.jev_api_key = os.getenv("JEV_API_KEY")
+        self.jev_conversation_mode = os.getenv(
+            "JEV_CONVERSATION_MODE", self.jev_conversation_mode
+        ).lower().strip()
+        if self.jev_conversation_mode not in {"disabled", "shadow", "active"}:
+            logger.warning("Ignoring invalid JEV_CONVERSATION_MODE; JEV is disabled")
+            self.jev_conversation_mode = "disabled"
+        self.jev_model = os.getenv("JEV_MODEL", self.jev_model).strip() or "jev-1.13"
+        self.jev_api_endpoint = os.getenv("JEV_API_ENDPOINT", self.jev_api_endpoint).strip() or "https://jev-ai.org/api/v1/systemone/"
+
         if not self.video_id:
             self.video_id = os.getenv("YOUTUBE_VIDEO_ID", "")
 
@@ -163,6 +184,9 @@ class Config:
         self.chat_check_interval = self._env_number("CHAT_CHECK_INTERVAL", self.chat_check_interval, int)
         self.gemini_search_daily_limit = self._env_number("GEMINI_SEARCH_DAILY_LIMIT", self.gemini_search_daily_limit, int)
         self.gemini_search_cache_ttl = self._env_number("GEMINI_SEARCH_CACHE_TTL", self.gemini_search_cache_ttl, int)
+        self.jev_max_calls_per_minute = min(
+            300, max(1, self._env_number("JEV_MAX_CALLS_PER_MINUTE", self.jev_max_calls_per_minute, int))
+        )
         self.ai_max_repair_attempts = self._env_number("AI_MAX_REPAIR_ATTEMPTS", self.ai_max_repair_attempts, int)
         self.ai_max_planner_steps = self._env_number("AI_MAX_PLANNER_STEPS", self.ai_max_planner_steps, int)
         self.ai_max_completion_tokens = max(
@@ -182,6 +206,16 @@ class Config:
         self.critic_timeout = self._env_number("CRITIC_TIMEOUT", self.critic_timeout, float)
         self.repair_timeout = self._env_number("REPAIR_TIMEOUT", self.repair_timeout, float)
         self.send_cooldown = self._env_number("SEND_COOLDOWN", self.send_cooldown, float)
+        self.jev_timeout = min(
+            15.0, max(0.5, self._env_number("JEV_TIMEOUT", self.jev_timeout, float))
+        )
+        self.jev_respond_threshold = min(
+            1.0, max(0.0, self._env_number("JEV_RESPOND_THRESHOLD", self.jev_respond_threshold, float))
+        )
+        self.jev_ignore_threshold = min(
+            self.jev_respond_threshold,
+            max(0.0, self._env_number("JEV_IGNORE_THRESHOLD", self.jev_ignore_threshold, float)),
+        )
 
         reasoning_env = os.getenv("RUKIYA_REASONING_ENABLED")
         if reasoning_env is not None:
