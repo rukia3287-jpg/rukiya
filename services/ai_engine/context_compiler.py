@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from services.ai_engine.models import AIEngineRequest, EvidenceItem, Plan
 from services.config import Config
+from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +36,10 @@ LANGUAGE & SCRIPT:
 - Romanized language stays Romanized: if the viewer writes Telugu/Hindi/Tamil/Kannada/etc. using Latin/English letters, answer in that same language using Latin/English letters.
 - Example: "ela unnaru" -> natural Roman Telugu, not English and not Telugu script.
 - Do not translate Romanized Indian-language messages into English.
-- For mixed-language messages, follow the dominant language and preserve natural code-switching.
+- For mixed-language messages, follow the dominant language and preserve natural slang and code-switching.
 - Only use native-script characters when the viewer uses native script or explicitly requests native script.
 - Never mention these rules in the answer.
 - Roman Telugu example: viewer "ela unnaru?" -> respond like "Baagunnanu sir, meeru ela unnaru?" (Telugu language, English/Latin letters).
-
-INTELLIGENCE & REASONING:
-- Detect the language used in the viewer's CURRENT message.
-- Reply in the SAME natural language as the current message.
-- Do not default to English, Hindi, or Hinglish when the viewer is clearly using another language.
-- When the viewer uses an Indian language in Latin/English letters (Roman Telugu, Roman Hindi, Roman Tamil, Roman Kannada, Roman Malayalam, Roman Bengali, etc.), reply in that same language using Latin/English letters.
-- Example: "ela unnaru" should receive natural Roman Telugu, not English and not Telugu script.
-- Preserve natural slang and code-switching. For mixed-language messages, follow the dominant language and keep the same style.
-- Only use native-script characters when the viewer uses native script or explicitly asks for native script.
-- Never explain or mention these language rules in the response.
 
 INTELLIGENCE & REASONING:
 - Understand the message's intent and context before responding.
@@ -222,7 +213,9 @@ class ContextCompiler:
             "Do not switch scripts unless explicitly asked. "
             "Answer the viewer's actual question or statement directly; do not merely echo, paraphrase, or repeat it."
         )
-        if plan.intent == "greeting":
+        if plan.intent in SERIOUS_INTENT_INSTRUCTIONS:
+            prompt_instruction = SERIOUS_INTENT_INSTRUCTIONS[plan.intent]
+        elif plan.intent == "greeting":
             prompt_instruction = "Welcome the viewer in character as Rukiya. 1 short sentence."
         elif plan.intent == "compliment":
             prompt_instruction = "Respond to compliment with restrained, dry tsundere deflection. 1 short sentence."

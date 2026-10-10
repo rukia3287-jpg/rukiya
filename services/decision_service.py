@@ -71,10 +71,46 @@ class DecisionService:
     # ─────────────────────────────────────────────────────────────
     # Intent Detection
     # ─────────────────────────────────────────────────────────────
+    # Serious messages are classified first, so "hi rukiya, I feel hopeless" is not a greeting.
+    CRISIS_PATTERNS = (
+        r"\bkill(?:ing)? myself\b",
+        r"\bsuicid(?:e|al)\b",
+        r"\b(?:want|wanna|going) to die\b",
+        r"\bend (?:my life|it all)\b",
+        r"\bself[- ]?harm(?:ing)?\b",
+        r"\b(?:hurt|hurting|cut|cutting) myself\b",
+        r"\bdon'?t want to (?:live|be alive|exist)\b",
+        r"\bno reason to live\b",
+        r"\b(?:marna|mar jana) chaht[ai]\b",
+        r"\bjeena nahi chaht[ai]\b",
+    )
+    SENSITIVE_PATTERNS = (
+        r"\bdepress(?:ed|ion)\b",
+        r"\b(?:panic|anxiety) attacks?\b",
+        r"\bhopeless\b",
+        r"\bworthless\b",
+        r"\blonely\b",
+        r"\b(?:passed away|funeral|grieving)\b",
+        r"\bbad day\b",
+        r"\bheart ?broken\b",
+        r"\b(?:i'?m|i am|feeling|feel) (?:so |really |very )?(?:sad|down|miserable|empty)\b",
+        r"\bi'?m not (?:okay|ok)\b",
+        r"\b(?:udaas|dukhi)\b",
+    )
+    URGENT_INTENTS = frozenset({"help", "crisis", "sensitive"})
+
+    def is_urgent_intent(self, intent: str) -> bool:
+        return intent in self.URGENT_INTENTS
+
     def detect_intent(self, text: str) -> str:
         """Heuristic intent classification."""
         cleaned = text.strip()
         lower = cleaned.lower()
+
+        if any(re.search(p, lower) for p in self.CRISIS_PATTERNS):
+            return "crisis"
+        if any(re.search(p, lower) for p in self.SENSITIVE_PATTERNS):
+            return "sensitive"
 
         # Greetings
         greeting_words = ("hi", "hello", "hey", "sup", "yo", "namaste", "konnichiwa", "welcome")
@@ -136,8 +172,8 @@ class DecisionService:
         # User relationship: regular chatters get a slight boost up to 1.0
         relationship_score = min(1.0, user.interaction_count / 10.0)
 
-        # Urgency: help or direct call or newcomer greeting
-        urgency_score = 1.0 if (intent == "help") or (intent == "greeting" and not user.is_welcomed_in_stream) else 0.0
+        # Urgency: help, serious messages, or a newcomer greeting
+        urgency_score = 1.0 if self.is_urgent_intent(intent) or (intent == "greeting" and not user.is_welcomed_in_stream) else 0.0
 
         random_score = self.rng.random()
 

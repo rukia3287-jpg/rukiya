@@ -17,7 +17,7 @@ import httpx
 
 from services.config import Config
 from services.models import GeneratedResponse, MemoryEntry, ResponseDecision
-from services.safety_service import validate_rukiya_response
+from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,11 @@ class AIService:
             "Detect the language of the CURRENT viewer message and reply in that same language. "
             "Preserve Roman/Latin script when the viewer uses Romanized language; never translate it into English."
         )
-        if decision and decision.intent == "greeting":
+        if decision and decision.intent in SERIOUS_INTENT_INSTRUCTIONS:
+            prompt_instruction = SERIOUS_INTENT_INSTRUCTIONS[decision.intent] + (
+                " Reply in the same language as the viewer's current message."
+            )
+        elif decision and decision.intent == "greeting":
             prompt_instruction = "Welcome the viewer in character as Rukiya. 1 short sentence."
         elif decision and decision.intent == "compliment":
             prompt_instruction = "Respond to compliment with restrained, dry tsundere deflection. 1 short sentence."

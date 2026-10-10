@@ -50,6 +50,9 @@ PROMPT_INJECTION_PATTERNS = [
 # Persona violations and unsafe terms
 UNSAFE_OUTPUT_PATTERNS = [
     r"\*[^*]+\*",  # Stage directions: *smiles*, *sighs*
+    # Stage directions in brackets: (smiles), [laughs], (crosses arms). Ordinary
+    # parentheticals such as "(PS5 only)" are left alone.
+    r"[\(\[]\s*(?:she\s+)?(?:sighs?|smiles?|smirks?|grins?|laughs?|giggles?|chuckles?|snickers?|blush(?:es)?|nods?|winks?|shrugs?|pouts?|huffs?|yawns?|gasps?|scoffs?|frowns?|glares?|facepalms?|coughs?|whispers?|mutters?|waves?|bows?|sips?|crosses (?:her |my )?arms|rolls (?:her |my )?eyes)\b[^\)\]]*[\)\]]",
     r"\b(?:uwu|idiot|dumbass|stupid|kill|hate you)\b",
     r"\b(?:bitch|fucker|motherfucker|nigger|nigga|faggot|retard|cunt)\b",
     r"\b(?:die|murder|suicide)\b",
@@ -57,6 +60,9 @@ UNSAFE_OUTPUT_PATTERNS = [
 ]
 
 FALLBACK_INTENTS: Dict[str, str] = {
+    # Serious messages never get persona snark, even when generation fails or is blocked.
+    "crisis": "Please reach out to someone you trust or a local crisis helpline right now, because you don't have to carry this alone.",
+    "sensitive": "That sounds really heavy, so please go easy on yourself and lean on someone you trust today.",
     "greeting": "Welcome in, chat.",
     "question": "Give me a second, chat.",
     "compliment": "Don't get used to being nice.",
@@ -64,6 +70,20 @@ FALLBACK_INTENTS: Dict[str, str] = {
     "spam": "Keep it civil, please.",
     "boundary": "Keep it civil, please.",
     "default": "Keep it friendly, chat."
+}
+
+
+# Generation guidance for serious messages, shared by the AI engine and legacy AIService.
+SERIOUS_INTENT_INSTRUCTIONS: Dict[str, str] = {
+    "sensitive": (
+        "The viewer is going through something serious. Drop all teasing and persona snark; "
+        "reply with calm, genuine care in one or two short sentences."
+    ),
+    "crisis": (
+        "The viewer may be in crisis. Drop all teasing and persona snark; reply with calm, genuine care "
+        "in one or two short sentences and gently encourage them to reach out to someone they trust "
+        "or a local crisis helpline."
+    ),
 }
 
 

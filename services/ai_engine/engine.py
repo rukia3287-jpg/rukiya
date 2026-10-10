@@ -33,7 +33,7 @@ from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
-from services.safety_service import validate_rukiya_response
+from services.safety_service import FALLBACK_INTENTS, validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,10 @@ STATIC_FALLBACKS = {
     "question": "I can't verify that properly right now.",
     "search_unavailable": "I can't verify that properly right now.",
     "temporary_failure": "Tch. Give me a second, chat.",
-    "default": "Don't be reckless, chat."
+    "default": "Don't be reckless, chat.",
+    # Serious messages share the orchestrator's caring fallbacks.
+    "crisis": FALLBACK_INTENTS["crisis"],
+    "sensitive": FALLBACK_INTENTS["sensitive"],
 }
 
 
