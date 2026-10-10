@@ -7,7 +7,7 @@ from cogs.utility_commands import Utility
 
 
 class FakeInteraction:
-    def __init__(self, user_name="Tester"):
+    def __init__(self, user_name="Tester", in_guild=True, is_admin=False):
         self.response = MagicMock()
         self.response.defer = AsyncMock()
         self.response.send_message = AsyncMock()
@@ -16,8 +16,13 @@ class FakeInteraction:
         self.followup = MagicMock()
         self.followup.send = AsyncMock()
 
+        # Real interactions always carry `guild` (None in DMs). Permissions default to
+        # non-admin so a test must opt in to privileged behavior explicitly.
+        self.guild = MagicMock() if in_guild else None
+
         self.user = MagicMock()
         self.user.display_name = user_name
+        self.user.guild_permissions.administrator = is_admin
 
 
 class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
@@ -45,7 +50,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Ichigo", sent_embed.footer.text)
 
     async def test_slash_ask_with_yt_posting(self):
-        interaction = FakeInteraction(user_name="Orihime")
+        interaction = FakeInteraction(user_name="Orihime", is_admin=True)
 
         ai_mock = MagicMock()
         ai_mock.generate_response = AsyncMock(return_value="Stay safe, Orihime.")
@@ -61,6 +66,30 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         cm_mock.send_chat_message.assert_called_once_with("Stay safe, Orihime.")
         sent_embed = interaction.followup.send.call_args[1].get("embed")
         self.assertIn("Posted to YouTube live chat", sent_embed.description)
+
+    async def _assert_yt_posting_refused(self, interaction):
+        ai_mock = MagicMock()
+        ai_mock.generate_response = AsyncMock(return_value="Should never be generated.")
+        self.bot.ai_service = ai_mock
+
+        cm_mock = MagicMock()
+        cm_mock.is_running = True
+        cm_mock.send_chat_message = AsyncMock(return_value=True)
+        self.bot.chat_monitor = cm_mock
+
+        await self.chat_cog.slash_ask.callback(self.chat_cog, interaction, question="Post this", post_to_yt=True)
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn("Only server administrators", interaction.response.send_message.call_args[0][0])
+        self.assertTrue(interaction.response.send_message.call_args[1].get("ephemeral"))
+        ai_mock.generate_response.assert_not_called()
+        cm_mock.send_chat_message.assert_not_called()
+
+    async def test_slash_ask_yt_posting_refused_for_non_admin(self):
+        await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", is_admin=False))
+
+    async def test_slash_ask_yt_posting_refused_in_direct_messages(self):
+        await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", in_guild=False, is_admin=True))
 
     async def test_slash_say_when_yt_not_running(self):
         interaction = FakeInteraction()
