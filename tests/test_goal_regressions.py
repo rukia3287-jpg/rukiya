@@ -11,6 +11,7 @@ from services.chat_monitor import ChatMonitor
 # from every other test module in the same discovery run.
 from services.youtube_service import YouTubeService
 from services.ai_service import RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
+from services.ai_engine.context_compiler import RUKIYA_SYSTEM_PROMPT as ENGINE_SYSTEM_PROMPT
 
 
 class EmptyAI:
@@ -163,7 +164,13 @@ class PersonaGoalTests(unittest.TestCase):
             ("Can you beat that boss?", "Give me one clean attempt first."),
             ("hello everyone", "Hm. Welcome in, everyone."),
         ]
-        self.assertIn("Never use stage directions", RUKIYA_SYSTEM_PROMPT)
+        # Both persona prompts (legacy AIService and AI engine) must carry an explicit
+        # prohibition on stage directions; the exact sentence wording is free to change.
+        for prompt in (RUKIYA_SYSTEM_PROMPT, ENGINE_SYSTEM_PROMPT):
+            self.assertRegex(prompt, r"(?im)^- (never|do not)\b[^\n]*\bstage directions\b")
+        for staged_reply in ("*sighs* Fine, welcome in.", "*crosses arms* Hmph."):
+            with self.subTest(staged_reply=staged_reply):
+                self.assertNotIn("*", validate_rukiya_response(staged_reply))
         forbidden = ("*", "uwu", "~", "idiot", "dumbass", "stupid")
         for user_message, simulated_model_reply in samples:
             with self.subTest(user_message=user_message):
