@@ -8,6 +8,8 @@ import asyncio
 import logging
 from typing import Any, Dict
 
+from services.memory_service import MemoryService
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,8 @@ def build_health_payload(bot: Any) -> Dict[str, Any]:
     discord_ready = bool(is_ready()) if callable(is_ready) else False
     failed_cogs = sorted(getattr(bot, "failed_cogs", []) or [])
     memory = getattr(bot, "memory_service", None)
+    if isinstance(memory, MemoryService):
+        memory.persistence_available()  # lets an idle bot leave fallback when SQLite is back
     memory_fallback = bool(getattr(memory, "fallback_mode", False))
     monitor = getattr(bot, "chat_monitor", None)
     youtube_monitoring = bool(getattr(monitor, "is_running", False))

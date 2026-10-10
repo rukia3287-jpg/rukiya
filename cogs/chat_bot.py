@@ -112,6 +112,9 @@ class RukiyaCog(commands.Cog):
             return
         if not self._discord_ai_allowed():
             return
+        # Start the per-user cooldown now, not after the reply: repeated mentions while a
+        # reply is generating must not drain the shared discord_ai bucket for everyone.
+        self._remember_discord_reply(user_id)
 
         # Clean prompt by stripping bot mention tag
         cleaned_text = message.content

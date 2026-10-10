@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 class MemoryService:
     """Manages stream and persistent user memories with SQLite and resilient fallback."""
 
-    # While in fallback, SQLite is retried at most this often. On recovery, users, user
-    # facts and identity links saved during the outage are written back. Stream-scoped
-    # data (sessions, stream facts, recent messages) stays in memory until the stream ends.
+    # While in fallback, SQLite is retried at most this often. On recovery, exactly what
+    # changed during the outage is replayed: deletions first, then users, user facts,
+    # stream facts and identity links, merged so stored data never moves backwards.
+    # Recent chat messages are not written back (they only feed short prompt context).
     DB_RETRY_SECONDS = 30.0
 
     def __init__(self, config: Optional[Config] = None, clock=None):
@@ -49,6 +50,14 @@ class MemoryService:
         self._in_memory_stream_memory: Dict[str, Dict[str, MemoryEntry]] = {}  # session_id:canonical_id -> {key: MemoryEntry}
         self._in_memory_recent_messages: Dict[str, List[Dict[str, Any]]] = {}  # session_id -> list of message dicts
         self._in_memory_identity_links: Dict[str, str] = {}  # secondary canonical_id -> primary canonical_id
+
+        # Changes that could not reach SQLite, replayed on recovery.
+        self._pending_users: set = set()  # canonical_ids
+        self._pending_memories: Dict[str, set] = {}  # canonical_id -> keys
+        self._pending_memory_resets: Dict[str, float] = {}  # canonical_id -> reset time
+        self._pending_stream_facts: Dict[Tuple[str, str, str], float] = {}  # (session, canonical_id, key) -> expires_at
+        self._pending_links: set = set()  # secondary ids to insert
+        self._pending_link_deletes: set = set()  # secondary ids to delete
 
         self.active_session_id: Optional[str] = None
         self._init_db()
@@ -83,45 +92,123 @@ class MemoryService:
         logger.warning("MemoryService recovered SQLite persistence and wrote back in-memory state")
         return True
 
+    def persistence_available(self) -> bool:
+        """True if SQLite is in use. While in fallback this also attempts a (rate-limited) recovery."""
+        if self._fallback_mode:
+            self._try_recover()
+        return not self._fallback_mode
+
     def _write_back_fallback_state(self) -> bool:
         conn = self._open_connection()
         if not conn:
             return False
+
+        def run(sql: str, params: tuple, what: str) -> None:
+            # A row that cannot be written (bad data) is skipped and logged; it must not
+            # keep the whole service in fallback. I/O errors still abort the recovery.
+            try:
+                conn.execute(sql, params)
+            except (sqlite3.IntegrityError, sqlite3.InterfaceError, sqlite3.ProgrammingError, ValueError, TypeError) as e:
+                logger.error("Skipping unwritable %s during recovery: %s", what, e)
+
         try:
             with conn:
-                for user in list(self._in_memory_users.values()):
-                    self._upsert_user(conn, user)
-                for canonical_id, entries in list(self._in_memory_memories.items()):
-                    for entry in list(entries.values()):
-                        # Never replace a row that is newer than the cached copy.
-                        conn.execute("""
+                # 1. Deletions first, so later writes are not removed again.
+                for secondary_id in sorted(self._pending_link_deletes):
+                    run("DELETE FROM identity_links WHERE secondary_id=?", (secondary_id,), "identity link removal")
+                for canonical_id, reset_at in self._pending_memory_resets.items():
+                    run("DELETE FROM memories WHERE canonical_id=? AND updated_at <= ?", (canonical_id, reset_at), "memory reset")
+
+                # 2. Users changed during the outage. A profile built while SQLite was
+                # unreachable may be blank, so counters only grow and stored metadata
+                # and first_seen are kept.
+                for canonical_id in sorted(self._pending_users):
+                    user = self._in_memory_users.get(canonical_id)
+                    if not user:
+                        continue
+                    meta = dict(user.metadata)
+                    meta["welcomed_in_stream"] = user.is_welcomed_in_stream
+                    run("""
+                        INSERT INTO users (canonical_id, platform, user_id, username, display_name, first_seen, last_seen, interaction_count, metadata)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(canonical_id) DO UPDATE SET
+                            username=excluded.username,
+                            display_name=excluded.display_name,
+                            last_seen=MAX(users.last_seen, excluded.last_seen),
+                            interaction_count=MAX(users.interaction_count, excluded.interaction_count)
+                    """, (
+                        user.canonical_id, user.platform, user.user_id, user.username, user.display_name,
+                        user.first_seen, user.last_seen, user.interaction_count, json.dumps(meta)
+                    ), "user")
+
+                # 3. User facts changed during the outage, merged like a normal update.
+                for canonical_id, keys in self._pending_memories.items():
+                    cached = self._in_memory_memories.get(canonical_id, {})
+                    for key in sorted(keys):
+                        entry = cached.get(key)
+                        if not entry:
+                            continue
+                        run("""
                             INSERT INTO memories (canonical_id, key, value, confidence, source, created_at, updated_at, last_used_at, usage_count)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT(canonical_id, key) DO UPDATE SET
-                                value=excluded.value,
-                                confidence=excluded.confidence,
-                                source=excluded.source,
-                                updated_at=excluded.updated_at,
-                                last_used_at=excluded.last_used_at,
-                                usage_count=excluded.usage_count
-                            WHERE excluded.updated_at > memories.updated_at
+                                value=CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.value ELSE memories.value END,
+                                source=CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.source ELSE memories.source END,
+                                confidence=MAX(memories.confidence, excluded.confidence),
+                                updated_at=MAX(memories.updated_at, excluded.updated_at),
+                                last_used_at=MAX(memories.last_used_at, excluded.last_used_at),
+                                usage_count=MAX(memories.usage_count, excluded.usage_count)
                         """, (
                             canonical_id, entry.key, entry.value, entry.confidence, entry.source,
                             entry.created_at, entry.updated_at, entry.last_used_at, entry.usage_count
-                        ))
-                for secondary_id, primary_id in list(self._in_memory_identity_links.items()):
-                    conn.execute(
+                        ), "user fact")
+                    # Keep the per-user cap: drop the oldest rows beyond it.
+                    run("""
+                        DELETE FROM memories WHERE canonical_id=? AND key NOT IN (
+                            SELECT key FROM memories WHERE canonical_id=? ORDER BY updated_at DESC LIMIT ?
+                        )
+                    """, (canonical_id, canonical_id, self.max_memory_per_user), "memory cap")
+
+                # 4. Stream facts, so the current stream's context survives recovery.
+                now = time.time()
+                for (session_id, canonical_id, key), expires_at in self._pending_stream_facts.items():
+                    entry = self._in_memory_stream_memory.get(f"{session_id}:{canonical_id}", {}).get(key)
+                    if not entry or expires_at <= now:
+                        continue
+                    run("""
+                        INSERT INTO stream_memory (session_id, canonical_id, key, value, confidence, created_at, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, canonical_id, key) DO UPDATE SET
+                            value=excluded.value,
+                            confidence=excluded.confidence,
+                            expires_at=excluded.expires_at
+                    """, (session_id, canonical_id, key, entry.value, entry.confidence, entry.created_at, expires_at), "stream fact")
+
+                # 5. Identity links added during the outage; never replace an existing link.
+                for secondary_id in sorted(self._pending_links):
+                    primary_id = self._in_memory_identity_links.get(secondary_id)
+                    if not primary_id:
+                        continue
+                    run(
                         "INSERT INTO identity_links (secondary_id, primary_id, created_at) VALUES (?, ?, ?) "
                         "ON CONFLICT(secondary_id) DO NOTHING",
                         (secondary_id, primary_id, time.time()),
+                        "identity link",
                     )
-            return True
         except Exception as e:
             logger.error("Error writing back in-memory state to DB: %s", e)
             self.fallback_mode = True
             return False
         finally:
             conn.close()
+
+        self._pending_users.clear()
+        self._pending_memories.clear()
+        self._pending_memory_resets.clear()
+        self._pending_stream_facts.clear()
+        self._pending_links.clear()
+        self._pending_link_deletes.clear()
+        return True
 
     def _open_connection(self) -> Optional[sqlite3.Connection]:
         try:
@@ -350,12 +437,14 @@ class MemoryService:
         self._in_memory_users[user.canonical_id] = user
         conn = self._get_connection()
         if not conn:
+            self._pending_users.add(user.canonical_id)
             return
         try:
             with conn:
                 self._upsert_user(conn, user)
         except Exception as e:
             logger.error("Error saving user to DB: %s", e)
+            self._pending_users.add(user.canonical_id)
             self.fallback_mode = True
         finally:
             conn.close()
@@ -384,9 +473,11 @@ class MemoryService:
         primary (for example, written by another process since this one loaded).
         """
         self._in_memory_identity_links[secondary_id] = primary_id
+        self._pending_link_deletes.discard(secondary_id)
         conn = self._get_connection()
         if not conn:
             logger.warning("Identity link held in memory only; database unavailable")
+            self._pending_links.add(secondary_id)
             return False
         try:
             with conn:
@@ -406,6 +497,7 @@ class MemoryService:
             raise
         except Exception as e:
             logger.error("Error saving identity link to DB: %s", e)
+            self._pending_links.add(secondary_id)
             return False
         finally:
             conn.close()
@@ -413,9 +505,11 @@ class MemoryService:
     def delete_identity_link(self, secondary_id: str) -> bool:
         """Remove a link. Returns True only if the removal was written to SQLite."""
         self._in_memory_identity_links.pop(secondary_id, None)
+        self._pending_links.discard(secondary_id)
         conn = self._get_connection()
         if not conn:
             logger.warning("Identity link removal held in memory only; database unavailable")
+            self._pending_link_deletes.add(secondary_id)
             return False
         try:
             with conn:
@@ -423,6 +517,7 @@ class MemoryService:
             return True
         except Exception as e:
             logger.error("Error deleting identity link from DB: %s", e)
+            self._pending_link_deletes.add(secondary_id)
             return False
         finally:
             conn.close()
@@ -551,9 +646,12 @@ class MemoryService:
                     ))
             except Exception as e:
                 logger.error("Error saving memory to DB: %s", e)
+                self._pending_memories.setdefault(canonical_id, set()).add(entry.key)
                 self.fallback_mode = True
             finally:
                 conn.close()
+        else:
+            self._pending_memories.setdefault(canonical_id, set()).add(entry.key)
 
         return entry
 
@@ -640,18 +738,26 @@ class MemoryService:
 
         return top_entries
 
-    def delete_user_memories(self, canonical_id: str) -> None:
-        """Reset all persistent memory for a user."""
+    def delete_user_memories(self, canonical_id: str) -> bool:
+        """Reset all persistent memory for a user.
+
+        Returns True if SQLite was updated. Otherwise the reset applies in memory now and
+        is replayed when the database recovers.
+        """
         self._in_memory_memories.pop(canonical_id, None)
+        self._pending_memories.pop(canonical_id, None)
         conn = self._get_connection()
         if conn:
             try:
                 with conn:
                     conn.execute("DELETE FROM memories WHERE canonical_id=?", (canonical_id,))
+                return True
             except Exception as e:
                 logger.error("Error deleting user memories: %s", e)
             finally:
                 conn.close()
+        self._pending_memory_resets[canonical_id] = time.time()
+        return False
 
     # ─────────────────────────────────────────────────────────────
     # Stream Memory (Temporary)
@@ -694,8 +800,11 @@ class MemoryService:
                     """, (sid, canonical_id, key, value, confidence, now, expires_at))
             except Exception as e:
                 logger.error("Error saving stream memory: %s", e)
+                self._pending_stream_facts[(sid, canonical_id, key)] = expires_at
             finally:
                 conn.close()
+        else:
+            self._pending_stream_facts[(sid, canonical_id, key)] = expires_at
 
         return entry
 

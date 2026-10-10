@@ -39,6 +39,25 @@ class HealthPayloadTests(unittest.TestCase):
         bot.chat_monitor = MagicMock(is_running=False)
         self.assertEqual(build_health_payload(bot)["status"], "ok")
 
+    def test_health_check_gives_memory_a_chance_to_recover(self):
+        import os
+        import shutil
+        import tempfile
+        from services.config import Config
+        from services.memory_service import MemoryService
+
+        db_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, db_dir, True)
+        now = [1000.0]
+        memory = MemoryService(Config(db_path=os.path.join(db_dir, "h.db")), clock=lambda: now[0])
+        memory.fallback_mode = True
+        bot = FakeBot()
+        bot.memory_service = memory
+
+        self.assertTrue(build_health_payload(bot)["memory_fallback_mode"])
+        now[0] += MemoryService.DB_RETRY_SECONDS + 1
+        self.assertFalse(build_health_payload(bot)["memory_fallback_mode"])
+
     def test_bot_still_starting_up_does_not_raise(self):
         payload = build_health_payload(FakeBot())
         self.assertEqual(payload["status"], "ok")

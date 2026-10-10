@@ -315,7 +315,13 @@ class AdminCommands(commands.Cog):
         clean_id = user_id.replace("<@", "").replace(">", "").replace("!", "").strip()
         canonical_id = f"discord:{clean_id}" if ":" not in clean_id else clean_id
 
-        mem_svc.delete_user_memories(canonical_id)
+        if mem_svc.delete_user_memories(canonical_id) is False:
+            await interaction.followup.send(
+                f"⚠️ Reset memories for `{canonical_id}` in memory only; the database is unavailable. "
+                "The reset will be applied when it recovers.",
+                ephemeral=True,
+            )
+            return
         await interaction.followup.send(f"✅ Reset all persistent memories for `{canonical_id}`.", ephemeral=True)
 
     # ────────────────────────────────────────────

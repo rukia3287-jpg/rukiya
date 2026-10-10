@@ -1,6 +1,7 @@
 """tests/test_v2_runtime_limits.py
 Startup configuration parsing, bounded per-user runtime state, and the Discord AI rate limit.
 """
+import asyncio
 import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -111,6 +112,32 @@ class DiscordRateLimitTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.on_message(FakeMessage("rukiya hi", FakeUser(id=1, name="A")))
             await self.cog.on_message(FakeMessage("rukiya hi", FakeUser(id=2, name="B")))
         self.assertEqual(self.orch.process_raw_text.await_count, 1)
+
+    async def test_one_user_cannot_drain_the_shared_discord_bucket(self):
+        self.bot.rate_limiter = RateLimiter(Config(rate_limit_discord_capacity=5))
+        self.cog.discord_cooldown_seconds = 30.0
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_reply(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return "Hm."
+
+        self.orch.process_raw_text = AsyncMock(side_effect=slow_reply)
+        spammer = FakeUser(id=7, name="Spammer")
+        first = asyncio.create_task(self.cog.on_message(FakeMessage("rukiya hi", spammer)))
+        await started.wait()
+        try:
+            for _ in range(4):
+                # Repeat mentions must be turned away at once, not queued behind the first.
+                await asyncio.wait_for(self.cog.on_message(FakeMessage("rukiya hi again", spammer)), timeout=1)
+        finally:
+            release.set()
+            await first
+
+        self.assertEqual(self.orch.process_raw_text.await_count, 1)
+        self.assertGreaterEqual(self.bot.rate_limiter.get_remaining("discord_ai"), 3.9)
 
     async def test_slash_ask_reports_the_discord_rate_limit(self):
         def interaction():

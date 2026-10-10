@@ -2,6 +2,7 @@
 import os
 import asyncio
 import logging
+import signal
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
@@ -141,9 +142,24 @@ async def start_web_server(bot: RukiyaBot):
 
 # ----- Main entrypoint -----
 
+def _install_shutdown_signals(bot: RukiyaBot) -> None:
+    """Close the bot cleanly on SIGTERM (Render stop/redeploy) and SIGINT."""
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda s=sig: (
+                logger.info("Received %s; shutting down", s.name),
+                asyncio.ensure_future(bot.close()),
+            ))
+        except (NotImplementedError, RuntimeError, AttributeError):
+            pass  # e.g. the Windows event loop has no signal handlers; Ctrl+C still works
+
+
 async def main():
+    bot = None
     try:
         bot = RukiyaBot()
+        _install_shutdown_signals(bot)
         await start_web_server(bot)
         await bot.start(bot.config.discord_token)
     except KeyboardInterrupt:
@@ -151,6 +167,11 @@ async def main():
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
         raise
+    finally:
+        # bot.start() returns or raises without running close() on most paths, so the
+        # YouTube poller and AI engine are shut down here as well (close() is idempotent).
+        if bot is not None and not bot.is_closed():
+            await bot.close()
 
 if __name__ == "__main__":
     try:
