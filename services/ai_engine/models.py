@@ -160,6 +160,7 @@ class AIEngineRequest:
     stream_memory: Optional[List[Any]] = None
     recent_messages: Optional[List[Dict[str, Any]]] = None
     request_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    conversation_strategy: Optional[Dict[str, str]] = None
 
 
 @dataclass
