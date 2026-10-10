@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from services.config import Config
 from services.models import ChatMessage
@@ -103,6 +104,45 @@ class TestIdentityService(unittest.TestCase):
 
         self.assertEqual(user.last_seen, 5000.0)
         self.assertEqual(self.memory.get_user(user.canonical_id).last_seen, 5000.0)
+
+    def test_future_or_millisecond_timestamp_cannot_freeze_last_seen(self):
+        msg = ChatMessage(
+            platform="youtube", message_id="m_future", user_id="UC_future",
+            username="viewer", display_name="Viewer", text="hello", timestamp=1000.0,
+        )
+        user = self.identity.resolve(msg)
+        before = time.time()
+        self.memory.record_interaction(user, "hello", role="user", timestamp=1.7e12)  # milliseconds by mistake
+
+        self.assertLessEqual(user.last_seen, time.time())
+        self.assertGreaterEqual(user.last_seen, before)
+
+    def test_assistant_turn_does_not_change_viewer_last_seen(self):
+        msg = ChatMessage(
+            platform="youtube", message_id="m_reply", user_id="UC_reply",
+            username="viewer", display_name="Viewer", text="hello", timestamp=1000.0,
+        )
+        user = self.identity.resolve(msg)
+        self.memory.record_interaction(user, msg.text, role="user", timestamp=msg.timestamp)
+        self.memory.record_interaction(user, "Hm. Welcome in.", role="assistant")
+
+        self.assertEqual(user.last_seen, 1000.0)
+        self.assertEqual(user.interaction_count, 1)
+
+    def test_recent_history_keeps_recording_order_across_clocks(self):
+        msg = ChatMessage(
+            platform="youtube", message_id="m_order", user_id="UC_order",
+            username="viewer", display_name="Viewer", text="first", timestamp=1000.0,
+        )
+        user = self.identity.resolve(msg)
+        self.memory.record_interaction(user, "first", role="user", timestamp=1000.0)
+        self.memory.record_interaction(user, "reply one", role="assistant")
+        self.memory.record_interaction(user, "second", role="user", timestamp=2000.0)
+        self.memory.record_interaction(user, "reply two", role="assistant")
+
+        # A fresh instance reads history from SQLite, which orders rows by timestamp.
+        history = MemoryService(self.config).get_recent_messages(limit=8)
+        self.assertEqual([m["text"] for m in history], ["first", "reply one", "second", "reply two"])
 
     def test_explicit_link_identities(self):
         self.identity.link_identities("discord:111", "youtube:UC_222")

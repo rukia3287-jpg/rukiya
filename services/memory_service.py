@@ -285,11 +285,14 @@ class MemoryService:
         session_id: Optional[str] = None,
         timestamp: Optional[float] = None,
     ) -> None:
-        # Use the message's own timestamp when known, so last_seen stays on the same clock
-        # IdentityService uses for first_seen; last_seen never moves backwards.
-        now = time.time() if timestamp is None else timestamp
-        user.last_seen = max(user.last_seen, now)
+        now = time.time()
         if role == "user":
+            # last_seen is the viewer's own latest activity, on the message clock that
+            # IdentityService uses for first_seen. Clamped to now so a future/millisecond
+            # timestamp cannot freeze it, and it never moves backwards. Assistant turns
+            # leave it alone. History rows below keep wall-clock order.
+            seen_at = now if timestamp is None else min(timestamp, now)
+            user.last_seen = max(user.last_seen, seen_at)
             user.interaction_count += 1
         self.save_user(user)
 

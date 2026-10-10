@@ -66,6 +66,25 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.last_seen, 1234.5)
         self.assertEqual(stored.interaction_count, 1)
 
+    async def test_reply_path_keeps_viewer_last_seen_on_message_timestamp(self):
+        self.decision.decide = MagicMock(return_value=ResponseDecision(should_respond=True, intent="chatter", reason="test"))
+        msg = ChatMessage(
+            platform="youtube",
+            message_id="msg_ts_reply",
+            user_id="UC_ts_reply",
+            username="ts_viewer",
+            display_name="TsViewer",
+            text="rukiya what's up",
+            timestamp=1234.5,
+        )
+
+        response = await self.orchestrator.process_message(msg)
+
+        self.assertIsNotNone(response)
+        stored = self.memory.get_user("youtube:UC_ts_reply")
+        self.assertEqual(stored.last_seen, 1234.5)
+        self.assertEqual(stored.interaction_count, 1)
+
     async def test_full_pipeline_success(self):
         msg = ChatMessage(
             platform="youtube",
