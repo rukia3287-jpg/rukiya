@@ -55,6 +55,11 @@ class TokenBucket:
 class RateLimiter:
     """Multi-bucket rate limiter managing global and per-user capacities."""
 
+    # Per-key (per-user) buckets are created on demand; beyond this many, buckets that
+    # have refilled to capacity are dropped. A full bucket behaves exactly like a new
+    # one, so pruning never changes a limiting decision.
+    MAX_KEYED_BUCKETS = 1000
+
     def __init__(self, config: Optional[Config] = None):
         self.config = config or Config()
         self._buckets: Dict[str, TokenBucket] = {}
@@ -80,9 +85,19 @@ class RateLimiter:
     def _get_or_create_bucket(self, bucket_type: str, key: Optional[str] = None) -> TokenBucket:
         b_key = self._get_bucket_key(bucket_type, key)
         if b_key not in self._buckets:
+            if key and len(self._buckets) >= self.MAX_KEYED_BUCKETS:
+                self._prune_idle_buckets()
             spec = self._default_specs.get(bucket_type, (5.0, 1.0))
             self._buckets[b_key] = TokenBucket(capacity=spec[0], refill_rate=spec[1])
         return self._buckets[b_key]
+
+    def _prune_idle_buckets(self) -> None:
+        idle = [
+            b_key for b_key, bucket in self._buckets.items()
+            if ":" in b_key and bucket.get_remaining() >= bucket.capacity
+        ]
+        for b_key in idle:
+            del self._buckets[b_key]
 
     def allow(self, bucket_type: str, key: Optional[str] = None, cost: float = 1.0) -> RateLimitResult:
         """

@@ -1,6 +1,7 @@
 # services/config.py
 """Centralized configuration for YouTube/Discord bot with environment variable support"""
 from __future__ import annotations
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Set, Optional
@@ -10,6 +11,8 @@ try:
     load_dotenv()
 except ImportError:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -145,50 +148,40 @@ class Config:
             pass
         self.db_path = os.getenv("DB_PATH", self.db_path)
 
-        # Parse integer env vars safely
-        try:
-            self.ai_cooldown = int(os.getenv("AI_COOLDOWN", str(self.ai_cooldown)))
-            self.max_message_length = int(os.getenv("MAX_MESSAGE_LENGTH", str(self.max_message_length)))
-            self.poll_interval = int(os.getenv("POLL_INTERVAL", str(self.poll_interval)))
-            self.max_memory_per_user = int(os.getenv("MAX_MEMORY_PER_USER", str(self.max_memory_per_user)))
-            self.max_stream_memory = int(os.getenv("MAX_STREAM_MEMORY", str(self.max_stream_memory)))
-            self.max_context_messages = int(os.getenv("MAX_CONTEXT_MESSAGES", str(self.max_context_messages)))
-            self.processed_messages_max = int(os.getenv("PROCESSED_MESSAGES_MAX", str(self.processed_messages_max)))
-            self.rate_limit_global_capacity = int(os.getenv("RATE_LIMIT_GLOBAL_CAPACITY", str(self.rate_limit_global_capacity)))
-            self.rate_limit_user_capacity = int(os.getenv("RATE_LIMIT_USER_CAPACITY", str(self.rate_limit_user_capacity)))
-            self.rate_limit_idle_capacity = int(os.getenv("RATE_LIMIT_IDLE_CAPACITY", str(self.rate_limit_idle_capacity)))
-            self.rate_limit_discord_capacity = int(os.getenv("RATE_LIMIT_DISCORD_CAPACITY", str(self.rate_limit_discord_capacity)))
-            self.chat_check_interval = int(os.getenv("CHAT_CHECK_INTERVAL", str(self.chat_check_interval)))
-            self.gemini_search_daily_limit = int(os.getenv("GEMINI_SEARCH_DAILY_LIMIT", str(self.gemini_search_daily_limit)))
-            self.gemini_search_cache_ttl = int(os.getenv("GEMINI_SEARCH_CACHE_TTL", str(self.gemini_search_cache_ttl)))
-            self.ai_max_repair_attempts = int(os.getenv("AI_MAX_REPAIR_ATTEMPTS", str(self.ai_max_repair_attempts)))
-            self.ai_max_planner_steps = int(os.getenv("AI_MAX_PLANNER_STEPS", str(self.ai_max_planner_steps)))
-            self.ai_max_completion_tokens = max(
-                64,
-                min(
-                    2000,
-                    int(os.getenv("RUKIYA_MAX_COMPLETION_TOKENS", str(self.ai_max_completion_tokens))),
-                ),
-            )
-            self.max_ai_concurrency = int(os.getenv("MAX_AI_CONCURRENCY", str(self.max_ai_concurrency)))
-            self.max_search_concurrency = int(os.getenv("MAX_SEARCH_CONCURRENCY", str(self.max_search_concurrency)))
-        except ValueError:
-            pass
+        # Parse integer env vars one at a time, so a bad value only affects itself
+        self.ai_cooldown = self._env_number("AI_COOLDOWN", self.ai_cooldown, int)
+        self.max_message_length = self._env_number("MAX_MESSAGE_LENGTH", self.max_message_length, int)
+        self.poll_interval = self._env_number("POLL_INTERVAL", self.poll_interval, int)
+        self.max_memory_per_user = self._env_number("MAX_MEMORY_PER_USER", self.max_memory_per_user, int)
+        self.max_stream_memory = self._env_number("MAX_STREAM_MEMORY", self.max_stream_memory, int)
+        self.max_context_messages = self._env_number("MAX_CONTEXT_MESSAGES", self.max_context_messages, int)
+        self.processed_messages_max = self._env_number("PROCESSED_MESSAGES_MAX", self.processed_messages_max, int)
+        self.rate_limit_global_capacity = self._env_number("RATE_LIMIT_GLOBAL_CAPACITY", self.rate_limit_global_capacity, int)
+        self.rate_limit_user_capacity = self._env_number("RATE_LIMIT_USER_CAPACITY", self.rate_limit_user_capacity, int)
+        self.rate_limit_idle_capacity = self._env_number("RATE_LIMIT_IDLE_CAPACITY", self.rate_limit_idle_capacity, int)
+        self.rate_limit_discord_capacity = self._env_number("RATE_LIMIT_DISCORD_CAPACITY", self.rate_limit_discord_capacity, int)
+        self.chat_check_interval = self._env_number("CHAT_CHECK_INTERVAL", self.chat_check_interval, int)
+        self.gemini_search_daily_limit = self._env_number("GEMINI_SEARCH_DAILY_LIMIT", self.gemini_search_daily_limit, int)
+        self.gemini_search_cache_ttl = self._env_number("GEMINI_SEARCH_CACHE_TTL", self.gemini_search_cache_ttl, int)
+        self.ai_max_repair_attempts = self._env_number("AI_MAX_REPAIR_ATTEMPTS", self.ai_max_repair_attempts, int)
+        self.ai_max_planner_steps = self._env_number("AI_MAX_PLANNER_STEPS", self.ai_max_planner_steps, int)
+        self.ai_max_completion_tokens = max(
+            64, min(2000, self._env_number("RUKIYA_MAX_COMPLETION_TOKENS", self.ai_max_completion_tokens, int))
+        )
+        self.max_ai_concurrency = self._env_number("MAX_AI_CONCURRENCY", self.max_ai_concurrency, int)
+        self.max_search_concurrency = self._env_number("MAX_SEARCH_CONCURRENCY", self.max_search_concurrency, int)
 
-        # Parse float env vars safely
-        try:
-            self.memory_decay_days = float(os.getenv("MEMORY_DECAY_DAYS", str(self.memory_decay_days)))
-            self.response_threshold = float(os.getenv("RESPONSE_THRESHOLD", str(self.response_threshold)))
-            self.anti_repeat_threshold = float(os.getenv("ANTI_REPEAT_THRESHOLD", str(self.anti_repeat_threshold)))
-            self.rate_limit_idle_interval = float(os.getenv("IDLE_CHAT_INTERVAL", str(self.rate_limit_idle_interval)))
-            self.openrouter_timeout = float(os.getenv("OPENROUTER_TIMEOUT", str(self.openrouter_timeout)))
-            self.gemini_timeout = float(os.getenv("GEMINI_TIMEOUT", str(self.gemini_timeout)))
-            self.search_timeout = float(os.getenv("SEARCH_TIMEOUT", str(self.search_timeout)))
-            self.critic_timeout = float(os.getenv("CRITIC_TIMEOUT", str(self.critic_timeout)))
-            self.repair_timeout = float(os.getenv("REPAIR_TIMEOUT", str(self.repair_timeout)))
-            self.send_cooldown = float(os.getenv("SEND_COOLDOWN", str(self.send_cooldown)))
-        except ValueError:
-            pass
+        # Parse float env vars one at a time, so a bad value only affects itself
+        self.memory_decay_days = self._env_number("MEMORY_DECAY_DAYS", self.memory_decay_days, float)
+        self.response_threshold = self._env_number("RESPONSE_THRESHOLD", self.response_threshold, float)
+        self.anti_repeat_threshold = self._env_number("ANTI_REPEAT_THRESHOLD", self.anti_repeat_threshold, float)
+        self.rate_limit_idle_interval = self._env_number("IDLE_CHAT_INTERVAL", self.rate_limit_idle_interval, float)
+        self.openrouter_timeout = self._env_number("OPENROUTER_TIMEOUT", self.openrouter_timeout, float)
+        self.gemini_timeout = self._env_number("GEMINI_TIMEOUT", self.gemini_timeout, float)
+        self.search_timeout = self._env_number("SEARCH_TIMEOUT", self.search_timeout, float)
+        self.critic_timeout = self._env_number("CRITIC_TIMEOUT", self.critic_timeout, float)
+        self.repair_timeout = self._env_number("REPAIR_TIMEOUT", self.repair_timeout, float)
+        self.send_cooldown = self._env_number("SEND_COOLDOWN", self.send_cooldown, float)
 
         reasoning_env = os.getenv("RUKIYA_REASONING_ENABLED")
         if reasoning_env is not None:
@@ -200,6 +193,19 @@ class Config:
         idle_enabled_env = os.getenv("IDLE_CHAT_ENABLED")
         if idle_enabled_env is not None:
             self.idle_chat_enabled = idle_enabled_env.lower() in ("1", "true", "yes")
+
+    @staticmethod
+    def _env_number(name: str, current, cast):
+        """Read one numeric env var; an invalid value keeps the default and is reported."""
+        raw = os.getenv(name)
+        if raw is None:
+            return current
+        try:
+            return cast(raw)
+        except ValueError:
+            # Report the variable, not its value, in case a secret was pasted into it.
+            logger.warning("Ignoring invalid %s value for %s; keeping %r", cast.__name__, name, current)
+            return current
 
     def update_from_dict(self, data: dict) -> None:
         for key, value in data.items():

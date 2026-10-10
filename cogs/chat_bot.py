@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from services.ai_service import RUKIYA_SYSTEM_PROMPT as SAFE_RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
+from services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ class RukiyaCog(commands.Cog):
         last_user_reply = self._last_discord_reply_at.get(user_id, 0.0)
         if now - last_user_reply < self.discord_cooldown_seconds:
             return
+        if not self._discord_ai_allowed():
+            return
 
         # Clean prompt by stripping bot mention tag
         cleaned_text = message.content
@@ -147,10 +150,31 @@ class RukiyaCog(commands.Cog):
                     reply = await self.generate_reply(cleaned_text, author=message.author.display_name)
 
                 if reply:
-                    self._last_discord_reply_at[user_id] = asyncio.get_event_loop().time()
+                    self._remember_discord_reply(user_id)
                     await message.reply(reply, mention_author=False)
         except Exception as e:
             logger.exception(f"Failed to reply to Discord message: {e}")
+
+    def _discord_ai_allowed(self) -> bool:
+        """Consume one token from the configured discord_ai bucket (RATE_LIMIT_DISCORD_CAPACITY).
+
+        Discord requests reach the orchestrator with bypass_cooldown=True, so this bucket is
+        what bounds Discord-triggered generation across all users.
+        """
+        limiter = getattr(self.bot, "rate_limiter", None)
+        if not isinstance(limiter, RateLimiter):
+            return True
+        return limiter.allow("discord_ai").allowed
+
+    def _remember_discord_reply(self, user_id: int) -> None:
+        now = asyncio.get_event_loop().time()
+        self._last_discord_reply_at[user_id] = now
+        if len(self._last_discord_reply_at) > 1000:
+            # Entries older than the cooldown no longer affect anything.
+            self._last_discord_reply_at = {
+                uid: t for uid, t in self._last_discord_reply_at.items()
+                if now - t < self.discord_cooldown_seconds
+            }
 
     # ────────────────────────────────────────────
     # YouTube chat callback
@@ -387,6 +411,13 @@ class RukiyaCog(commands.Cog):
         ):
             await interaction.response.send_message(
                 "❌ Only server administrators can post an AI reply to YouTube chat.",
+                ephemeral=True,
+            )
+            return
+
+        if not self._discord_ai_allowed():
+            await interaction.response.send_message(
+                "⏳ Rukiya is answering a lot of questions right now. Try again in a few seconds.",
                 ephemeral=True,
             )
             return

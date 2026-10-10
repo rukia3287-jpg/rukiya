@@ -113,6 +113,8 @@ class DecisionService:
         r"\b(?:udaas|dukhi)\b",
     )
     URGENT_INTENTS = frozenset({"help", "crisis", "sensitive"})
+    RECENT_RESPONSE_WINDOW = 15.0  # seconds a user counts as "recently responded to"
+    MAX_TRACKED_USERS = 1000
 
     def is_urgent_intent(self, intent: str) -> bool:
         return intent in self.URGENT_INTENTS
@@ -227,7 +229,7 @@ class DecisionService:
 
         # Recently responded penalty (responded to this user in last 15s)
         last_resp = self._last_responded_timestamps.get(user.canonical_id, 0.0)
-        recently_responded = 0.30 if (now - last_resp < 15.0) else 0.0
+        recently_responded = 0.30 if (now - last_resp < self.RECENT_RESPONSE_WINDOW) else 0.0
 
         # Chat flood penalty (more than 10 messages across all users in last 5s)
         self._recent_message_timestamps = [t for t in self._recent_message_timestamps if now - t < 5.0]
@@ -275,6 +277,12 @@ class DecisionService:
         if len(self._recent_fingerprints) > self._max_recent_fingerprints:
             self._recent_fingerprints = self._recent_fingerprints[-self._max_recent_fingerprints:]
         self._last_responded_timestamps[user_canonical_id] = now
+        if len(self._last_responded_timestamps) > self.MAX_TRACKED_USERS:
+            # Entries outside the window no longer affect any decision.
+            self._last_responded_timestamps = {
+                uid: t for uid, t in self._last_responded_timestamps.items()
+                if now - t < self.RECENT_RESPONSE_WINDOW
+            }
 
     # ─────────────────────────────────────────────────────────────
     # Main Decision Method
