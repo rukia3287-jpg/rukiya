@@ -61,7 +61,7 @@ Rukiya V2 introduces a major architectural evolution by establishing strict serv
    - **Temporary Stream Memory**: Facts, ongoing topics, viewer questions specific to the current livestream. Deleted when the stream ends; each stream fact also carries a TTL (6h for automatically extracted facts, 24h default otherwise).
    - **Persistent User Memory**: Long-term preferences (`preferred_name`, `favorite_game`, interaction stats). Backed by SQLite with automatic confidence decay:
      $$\text{confidence}_{\text{effective}} = \text{confidence}_{\text{stored}} \cdot e^{-\frac{\text{age\_days}}{\text{decay\_constant}}}$$
-     Features deterministic conflict resolution, capacity limits (max 30 persistent facts per user), and an in-memory fallback if SQLite fails. While in fallback, SQLite is retried every 30 seconds; on recovery the users, facts and identity links saved during the outage are written back (stream-scoped data stays in memory). Messages classified as serious (see Safety) are never mined for profile facts.
+     Features deterministic conflict resolution, capacity limits (max 30 persistent facts per user), and an in-memory fallback if SQLite fails. While in fallback, SQLite is retried every 30 seconds. On recovery, exactly what changed during the outage is replayed: deletions (memory resets, link removals) first, then users, user facts, stream facts and identity links, merged so stored data never moves backwards (counters only grow, the higher confidence wins, the per-user cap is kept). Recent chat messages are not written back. Messages classified as serious (see Safety) are never mined for profile facts.
 
 4. **Decision Engine (`services/decision_service.py`)**:
    Deterministic hard rules (filter configured bot users and banned words; duplicate YouTube messages are dropped earlier by the chat monitor's LRU) followed by intent detection and weighted priority scoring:
@@ -339,7 +339,7 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 
 ### 4. Database Resilience
 - If SQLite encounters a disk or permission issue, `MemoryService` logs a warning and switches to in-memory fallback so chat and Discord keep working. `/health` reports `memory_fallback_mode: true`.
-- SQLite is retried every 30 seconds. On recovery, users, facts and identity links saved during the outage are written back and the log says `MemoryService recovered SQLite persistence`.
+- SQLite is retried every 30 seconds (also when `/health` is polled). On recovery the changes made during the outage are replayed and merged, and the log says `MemoryService recovered SQLite persistence`. `/memory_reset` during an outage says the reset is pending and applies it on recovery.
 
 ---
 
@@ -347,7 +347,7 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 
 - Memories stored before YouTube identities switched to channel IDs are keyed by display name and are not migrated (doing it by name would be the unsafe merge this avoids). Returning YouTube viewers start with a fresh profile once.
 - No command creates identity links yet (see Identity & Cross-Platform Links).
-- Deletes made while the database is unavailable (memory reset, unlink) are not replayed on recovery; unlink reports `persisted=False` so it can be retried.
+- Interactions counted while the database was unavailable are merged with `MAX`, so a returning viewer's count may miss the few messages sent during the outage.
 - Serious-message detection is pattern-based (English and some Roman Hindi). It cannot catch every phrasing, and crisis fallbacks are English-only with a non-region-specific helpline mention.
 - `/shayari_send` lets any member post a predefined shayari to YouTube chat; restricting it would change public command behavior and is left to the owner.
 - Live Discord/YouTube behavior is verified by unit tests with stubs, not by an automated end-to-end run against real platforms.
