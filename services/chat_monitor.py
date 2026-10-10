@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+import inspect
 import logging
 import random
 import time
@@ -11,7 +12,9 @@ from typing import Any, Awaitable, Callable, Optional, Union
 logger = logging.getLogger(__name__)
 
 ConfigType = Union[dict, object, None]
-SubscriberType = Callable[[str, str], Awaitable[Any]]
+# Subscribers are called as callback(message, author) or, if they accept a third
+# positional argument, callback(message, author, author_details).
+SubscriberType = Callable[..., Awaitable[Any]]
 
 
 class ChatMonitor:
@@ -69,10 +72,22 @@ class ChatMonitor:
         if callback in self.subscribers:
             self.subscribers.remove(callback)
 
-    async def _notify_subscribers(self, message: str, author: str) -> None:
+    @staticmethod
+    def _accepts_author_details(callback: SubscriberType) -> bool:
+        try:
+            params = list(inspect.signature(callback).parameters.values())
+        except (TypeError, ValueError):
+            return False
+        positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        return len(positional) >= 3 or any(p.kind == p.VAR_POSITIONAL for p in params)
+
+    async def _notify_subscribers(self, message: str, author: str, author_details: Optional[dict] = None) -> None:
         for callback in list(self.subscribers):
             try:
-                await callback(message, author)
+                if author_details is not None and self._accepts_author_details(callback):
+                    await callback(message, author, author_details)
+                else:
+                    await callback(message, author)
             except Exception:
                 logger.exception(
                     "Subscriber failed: %r for author=%s message=%r",
@@ -217,7 +232,7 @@ class ChatMonitor:
                 # Deliver first, then mark as processed. If every subscriber fails,
                 # the message remains eligible for a later poll instead of being lost.
                 self._last_activity_at = time.monotonic()
-                await self._notify_subscribers(message, author)
+                await self._notify_subscribers(message, author, author_details)
 
                 self.processed_messages[message_id] = time.monotonic()
                 if len(self.processed_messages) > self.processed_messages_max:

@@ -152,7 +152,7 @@ class RukiyaCog(commands.Cog):
     # ────────────────────────────────────────────
     # YouTube chat callback
     # ────────────────────────────────────────────
-    async def on_yt_message(self, message: str, author: str):
+    async def on_yt_message(self, message: str, author: str, author_details: Optional[dict] = None):
         """Called by ChatMonitor for every YouTube chat message."""
         if not self.enabled:
             return
@@ -169,13 +169,20 @@ class RukiyaCog(commands.Cog):
 
             if isinstance(orch, RukiyaOrchestrator):
                 from services.models import ChatMessage
+                details = author_details or {}
+                # The channel ID is the stable identity; display names are neither unique
+                # nor immutable. Without one (legacy two-argument delivery) resolve() falls
+                # back to the username key, which is the previous behavior.
+                channel_id = str(details.get("channelId") or "").strip() or None
                 chat_msg = ChatMessage(
                     platform="youtube",
                     message_id=f"yt_{int(time.time() * 1000)}",
-                    user_id=author,
+                    user_id=channel_id,
                     username=author,
                     display_name=author,
-                    text=message
+                    text=message,
+                    is_owner=bool(details.get("isChatOwner")),
+                    is_moderator=bool(details.get("isChatModerator")),
                 )
                 res = await orch.process_message(chat_msg)
                 reply = res.text if res else None
