@@ -4,12 +4,12 @@ from services.adaptive_behavior import AdaptiveBehaviorController
 def test_complex_task_gets_deeper_effort():
     controller = AdaptiveBehaviorController()
     profile = controller.assess(
-        text="Debug this architecture and explain the root cause step by step",
+        text="Debug this architecture, plan a fix, and explain the root cause step by step",
         intent="help",
         platform="discord",
     )
     assert profile.effort_level in {"analytical", "deep"}
-    assert profile.complexity_hint >= 0.5
+    assert profile.complexity_hint >= 0.6
 
 
 def test_serious_intent_disables_humor():
