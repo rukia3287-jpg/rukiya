@@ -195,7 +195,14 @@ class AIService:
     # ─────────────────────────────────────────────────────────────
     # Core LLM Call
     # ─────────────────────────────────────────────────────────────
-    async def _call_openrouter(self, messages_or_prompt: Any, author: str = "viewer", max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> Optional[str]:
+    async def _call_openrouter(
+        self,
+        messages_or_prompt: Any,
+        author: str = "viewer",
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> Optional[str]:
         """Low-level OpenRouter call with exponential backoff."""
         if not self.openrouter_key:
             return None
@@ -230,8 +237,9 @@ class AIService:
             "max_completion_tokens": resolved_max_tokens,
             "temperature": resolved_temperature,
         }
-        if self.reasoning_enabled and self.reasoning_effort in {"low", "medium", "high", "xhigh"}:
-            payload["reasoning"] = {"effort": self.reasoning_effort}
+        resolved_reasoning_effort = str(reasoning_effort or self.reasoning_effort).lower()
+        if self.reasoning_enabled and resolved_reasoning_effort in {"low", "medium", "high", "xhigh"}:
+            payload["reasoning"] = {"effort": resolved_reasoning_effort}
 
         should_close = False
         client = self.http_client
@@ -292,11 +300,14 @@ class AIService:
         self,
         messages: List[Dict[str, str]],
         author: str = "viewer",
-        max_tokens: int = 150
+        max_tokens: int = 150,
+        reasoning_effort: Optional[str] = None,
     ) -> Optional[GeneratedResponse]:
         """Pure generation method taking compact message context."""
         start_time = time.time()
-        raw = await self._call_openrouter(messages, author=author, max_tokens=max_tokens)
+        raw = await self._call_openrouter(
+            messages, author=author, max_tokens=max_tokens, reasoning_effort=reasoning_effort
+        )
         latency_ms = (time.time() - start_time) * 1000.0
 
         if not raw:
