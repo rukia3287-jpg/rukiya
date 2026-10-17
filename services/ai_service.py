@@ -135,7 +135,8 @@ class AIService:
         persistent_memory: Optional[List[MemoryEntry]] = None,
         stream_memory: Optional[List[MemoryEntry]] = None,
         recent_messages: Optional[List[Dict[str, Any]]] = None,
-        decision: Optional[ResponseDecision] = None
+        decision: Optional[ResponseDecision] = None,
+        style_instruction: Optional[str] = None
     ) -> List[Dict[str, str]]:
         """
         Build compact context with budgeted token footprint:
@@ -183,6 +184,9 @@ class AIService:
             prompt_instruction = "Welcome the viewer in character as Rukiya. 1 short sentence."
         elif decision and decision.intent == "compliment":
             prompt_instruction = "Respond to compliment with restrained, dry tsundere deflection. 1 short sentence."
+
+        if style_instruction:
+            prompt_instruction += f"\nADAPTIVE RESPONSE POLICY: {style_instruction}"
 
         current_content = f"{user_context_block}[Stream viewer '{author}' says]: {user_message}\n\n{prompt_instruction}"
         messages.append({"role": "user", "content": current_content})
