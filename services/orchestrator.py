@@ -114,8 +114,8 @@ class RukiyaOrchestrator:
             profile.effort_level, profile.complexity_hint, bool(profile.local_reply), decision.intent
         )
 
-        # 6. Rate Limiting Check
-        if not bypass_cooldown:
+        # 6. Rate Limiting Check. Deterministic local replies do not consume AI quota.
+        if not bypass_cooldown and not profile.local_reply:
             # Check global limit
             global_res = self.rate_limiter.allow("global_ai")
             if not global_res.allowed:
@@ -186,7 +186,18 @@ class RukiyaOrchestrator:
                 style_instruction=profile.style_instruction
             )
             try:
-                generated = await self.ai_service.generate(prompt_messages, author=user.display_name)
+                reasoning_effort = {
+                    "instant": "low",
+                    "contextual": "low",
+                    "standard": "medium",
+                    "analytical": "medium",
+                    "deep": "high",
+                }.get(profile.effort_level, "medium")
+                generated = await self.ai_service.generate(
+                    prompt_messages,
+                    author=user.display_name,
+                    reasoning_effort=reasoning_effort,
+                )
             except Exception as e:
                 logger.exception("AI generation exception: %s", e)
 
