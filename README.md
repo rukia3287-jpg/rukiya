@@ -397,3 +397,48 @@ Environment switches:
 When configured, the local model is attempted after cloud generation fails, before deterministic fallback, for ordinary conversation. It may also synthesize already-verified search evidence. It is deliberately **not** used to invent fresh/current facts when search verification fails. It does not consume cloud generation quota. If Rukiya runs on Render or another remote host, `127.0.0.1` refers to that host, not your personal PC; the model endpoint must be reachable from the bot process. Leave `LOCAL_LLM_BASE_URL` empty to keep the provider disabled.
 
 The effort labels are routing policies, not an IQ measurement. Higher effort is not a guarantee of correctness; verification and safety checks remain necessary.
+
+
+### Optional local model fallback (Ollama)
+
+The bot can use a small Ollama model when cloud generation is unavailable. For a bot hosted on Render, do **not** configure the bot to use `127.0.0.1:11434`: that points at Render, not your home PC. The optional gateway below keeps Ollama off the public network and requires a bearer API key.
+
+**Local setup on Windows with Docker Desktop**
+
+1. Copy `deploy/.env.example` to `deploy/.env`.
+2. Replace `LOCAL_LLM_API_KEY` with a random secret of at least 32 characters. Keep `deploy/.env` private; never commit it or paste the key into chat.
+3. From the repository root, start the private model and gateway:
+
+   ```powershell
+   docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --build
+   docker compose --env-file deploy/.env -f deploy/docker-compose.yml exec ollama ollama pull qwen2.5:3b
+   ```
+
+   The first model download takes time. Ollama is only on Docker's internal network; the gateway binds to `127.0.0.1:8081` on your PC.
+
+4. Test locally before creating any tunnel:
+
+   ```powershell
+   curl.exe http://localhost:8081/health
+   ```
+
+   The health route only tests the gateway process. A model request requires the bearer key and a pulled model.
+
+**Temporary remote test from Render**
+
+Install `cloudflared` on the PC running Ollama, then run:
+
+```powershell
+cloudflared tunnel --url http://localhost:8081
+```
+
+Cloudflare prints a temporary HTTPS `trycloudflare.com` URL. This tunnel URL changes when the tunnel restarts and is intended for testing, not permanent production hosting. The gateway still requires `Authorization: Bearer <your key>`; never expose port `11434` directly. Requests pass through Cloudflare, and the PC must remain online. For a stable deployment, use a named Cloudflare Tunnel and your own hostname, or run Ollama plus the gateway on an always-on server you control.
+
+Set these variables in the **Rukiya hosting environment** (Render, not the PC's shell):
+
+- `LOCAL_LLM_BASE_URL=https://YOUR-TUNNEL-HOST/v1` (replace with the actual HTTPS hostname; no trailing slash needed)
+- `LOCAL_LLM_MODEL=qwen2.5:3b`
+- `LOCAL_LLM_API_KEY=` the same secret stored in `deploy/.env`
+- `LOCAL_LLM_TIMEOUT=60`
+
+Leave the endpoint unset until the gateway and model respond locally. The provider is optional and should fail open to the existing deterministic fallback if the remote endpoint is down. This setup does not deploy or start anything on Render automatically.
