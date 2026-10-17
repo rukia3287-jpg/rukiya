@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.providers.gemini import GeminiProvider
+from services.ai_engine.providers.local_llm import LocalLLMProvider
 from services.ai_engine.providers.openrouter import OpenRouterProvider
 from services.config import Config
 
@@ -25,6 +26,8 @@ class ProviderRegistry:
     def _initialize_default_providers(self) -> None:
         self.register(OpenRouterProvider(self.config))
         self.register(GeminiProvider(self.config))
+        # Optional: register always, but it is available only when a base URL is set.
+        self.register(LocalLLMProvider(self.config))
 
     def register(self, provider: AIProvider) -> None:
         self._providers[provider.name] = provider
