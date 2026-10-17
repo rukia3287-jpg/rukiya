@@ -94,7 +94,14 @@ class AIEngine:
         if gemini and hasattr(gemini, "set_health_tracker"):
             gemini.set_health_tracker(self.health_tracker)
 
-    async def _generate(self, provider: AIProvider, messages: List[dict], *, track_health: bool = True) -> AIProviderResult:
+    async def _generate(
+        self,
+        provider: AIProvider,
+        messages: List[dict],
+        *,
+        track_health: bool = True,
+        reasoning_effort: Optional[str] = None,
+    ) -> AIProviderResult:
         """Dispatch one generation call (primary, backup or repair).
 
         Every dispatch counts toward the global daily cap, whether it succeeds or not.
@@ -127,7 +134,10 @@ class AIEngine:
                     retryable=False
                 )
             )
-        res = await self.executor.execute_generate(provider, messages)
+        effort_kwargs = {}
+        if reasoning_effort in {"low", "medium", "high"}:
+            effort_kwargs["reasoning_effort"] = reasoning_effort
+        res = await self.executor.execute_generate(provider, messages, **effort_kwargs)
         if track_health:
             self.health_tracker.record_call(f"{name}:generation", not bool(res.error), res.latency_ms, error=res.error_details)
         return res
@@ -275,6 +285,16 @@ class AIEngine:
         start_time = time.time()
         request_id = request.request_id
 
+        # Map task effort to provider reasoning effort where supported. Providers that
+        # do not expose this control safely ignore the extra keyword via their adapter.
+        reasoning_effort = {
+            "instant": "low",
+            "contextual": "low",
+            "standard": "medium",
+            "analytical": "medium",
+            "deep": "high",
+        }.get(str(getattr(request, "effort_level", "standard")).lower(), "medium")
+
         # 1. Planning
         plan = self.planner.plan(request)
 
@@ -335,7 +355,7 @@ class AIEngine:
                 provider_used = "openrouter"
                 final_provider = "openrouter"
                 messages = self.compiler.compile(request, plan)
-                res = await self._generate(openrouter, messages)  # type: ignore[arg-type]
+                res = await self._generate(openrouter, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
@@ -345,7 +365,7 @@ class AIEngine:
                     fallback_used = True
                     fallback_reason = "openrouter_failed"
                     if gemini and self.health_tracker.is_available("gemini:generation"):
-                        b_res = await self._generate(gemini, messages)  # type: ignore[arg-type]
+                        b_res = await self._generate(gemini, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                             provider_used = "gemini_backup"
@@ -368,7 +388,7 @@ class AIEngine:
                 provider_used = "gemini"
                 final_provider = "gemini"
                 messages = self.compiler.compile(request, plan)
-                res = await self._generate(gemini, messages)  # type: ignore[arg-type]
+                res = await self._generate(gemini, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
@@ -424,7 +444,7 @@ class AIEngine:
                             search_succeeded=True,
                             verified_current_information=True
                         )
-                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
+                        gen_res = await self._generate(openrouter, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
                         elif sr.text.strip():
@@ -465,11 +485,11 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
+                        gen_res = await self._generate(openrouter, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
                         elif gemini and self.health_tracker.is_available("gemini:generation"):
-                            b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
+                            b_res = await self._generate(gemini, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                             if b_res.text and not b_res.error:
                                 candidate_text = b_res.text
                                 provider_used = "degraded_hybrid (gemini)"
@@ -494,7 +514,7 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
+                        b_res = await self._generate(gemini, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                         else:
@@ -545,7 +565,7 @@ class AIEngine:
                 # Generator lambda for repair
                 async def _repair_gen(msgs: List[dict]) -> AIProviderResult:
                     target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
-                    return await self._generate(target_prov, msgs, track_health=False)  # type: ignore[arg-type]
+                    return await self._generate(target_prov, msgs, track_health=False, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
                     initial_text=candidate_text,
