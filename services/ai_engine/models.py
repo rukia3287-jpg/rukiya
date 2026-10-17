@@ -159,6 +159,10 @@ class AIEngineRequest:
     persistent_memory: Optional[List[Any]] = None
     stream_memory: Optional[List[Any]] = None
     recent_messages: Optional[List[Dict[str, Any]]] = None
+    # Adaptive hints are advisory and default to legacy behavior for existing callers.
+    complexity_hint: float = 0.0
+    effort_level: str = "standard"
+    style_instruction: Optional[str] = None
     request_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
 
 
