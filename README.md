@@ -420,9 +420,11 @@ The bot can use a small Ollama model when cloud generation is unavailable. For a
 
    ```powershell
    curl.exe http://localhost:8081/health
+   $apiKey = (Get-Content deploy/.env | Where-Object { $_ -match '^LOCAL_LLM_API_KEY=' } | Select-Object -First 1).Split('=', 2)[1]
+   curl.exe -H "Authorization: Bearer $apiKey" http://localhost:8081/v1/models
    ```
 
-   The health route only tests the gateway process. A model request requires the bearer key and a pulled model.
+   The first command checks the gateway; the second verifies authenticated access to Ollama. Confirm `qwen2.5:3b` appears in the model list before continuing.
 
 **Temporary remote test from Render**
 
