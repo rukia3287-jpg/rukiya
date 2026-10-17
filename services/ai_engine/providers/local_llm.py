@@ -113,7 +113,7 @@ class LocalLLMProvider(AIProvider):
             latency = (time.time() - started) * 1000.0
             err = ProviderError(
                 provider=self.name, capability="generation",
-                category=ErrorCategory.TIMEOUT if isinstance(exc, TimeoutError) else ErrorCategory.NETWORK_ERROR,
+                category=ErrorCategory.TIMEOUT if isinstance(exc, (TimeoutError, httpx.TimeoutException)) else ErrorCategory.NETWORK_ERROR,
                 retryable=True, message=str(exc)[:240],
             )
             logger.info("Local LLM fallback unavailable: %s", err)
