@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 from services.ai_engine.engine import AIEngine
 from services.ai_engine.models import AIEngineRequest, RequestPriority
 from services.ai_service import AIService
+from services.adaptive_behavior import AdaptiveBehaviorController
 from services.config import Config
 from services.decision_service import DecisionService
 from services.identity_service import IdentityService
@@ -48,6 +49,7 @@ class RukiyaOrchestrator:
         self.rate_limiter = rate_limiter or RateLimiter(self.config)
         self.ai_service = ai_service or AIService(self.config)
         self.ai_engine = ai_engine
+        self.adaptive_behavior = AdaptiveBehaviorController(self.config)
 
     async def process_message(
         self,
@@ -99,8 +101,21 @@ class RukiyaOrchestrator:
         if not decision.should_respond:
             return None
 
-        # 5. Rate Limiting Check
-        if not bypass_cooldown:
+        # 5. Adaptive policy: task effort and communication style are independent.
+        profile = self.adaptive_behavior.assess(
+            text=message.text,
+            intent=decision.intent,
+            platform=message.platform,
+            interaction_count=int(getattr(user, "interaction_count", 0) or 0),
+            has_memory=bool(persistent_memory or session_context or recent_messages),
+        )
+        logger.info(
+            "event=adaptive_profile effort=%s complexity_hint=%.2f local_reply=%s intent=%s",
+            profile.effort_level, profile.complexity_hint, bool(profile.local_reply), decision.intent
+        )
+
+        # 6. Rate Limiting Check. Deterministic local replies do not consume AI quota.
+        if not bypass_cooldown and not profile.local_reply:
             # Check global limit
             global_res = self.rate_limiter.allow("global_ai")
             if not global_res.allowed:
@@ -113,9 +128,18 @@ class RukiyaOrchestrator:
                 logger.warning("event=rate_limited scope=user_ai user=%s wait=%.1fs", user.canonical_id, user_res.wait_time)
                 return None
 
-        # 6 & 7. AI Generation (AI Engine or AIService)
+        # 7. Hybrid response selection: optional local rules, then the existing AI stack.
         generated: Optional[GeneratedResponse] = None
-        if self.ai_engine is not None:
+        if profile.local_reply:
+            generated = GeneratedResponse(
+                text=profile.local_reply,
+                confidence=0.9,
+                used_memory=False,
+                latency_ms=0.0,
+                model="local_rules",
+                is_fallback=False,
+            )
+        elif self.ai_engine is not None:
             try:
                 priority_score = float(getattr(decision, "priority", 1.0) or 0.0)
                 if priority_score < 0.50:
@@ -136,6 +160,9 @@ class RukiyaOrchestrator:
                     persistent_memory=persistent_memory if decision.memory_needed else None,
                     stream_memory=session_context if decision.memory_needed else None,
                     recent_messages=recent_messages,
+                    complexity_hint=profile.complexity_hint,
+                    effort_level=profile.effort_level,
+                    style_instruction=profile.style_instruction,
                 )
                 engine_res = await self.ai_engine.process(engine_req)
                 generated = GeneratedResponse(
@@ -155,10 +182,22 @@ class RukiyaOrchestrator:
                 persistent_memory=persistent_memory if decision.memory_needed else None,
                 stream_memory=session_context if decision.memory_needed else None,
                 recent_messages=recent_messages,
-                decision=decision
+                decision=decision,
+                style_instruction=profile.style_instruction
             )
             try:
-                generated = await self.ai_service.generate(prompt_messages, author=user.display_name)
+                reasoning_effort = {
+                    "instant": "low",
+                    "contextual": "low",
+                    "standard": "medium",
+                    "analytical": "medium",
+                    "deep": "high",
+                }.get(profile.effort_level, "medium")
+                generated = await self.ai_service.generate(
+                    prompt_messages,
+                    author=user.display_name,
+                    reasoning_effort=reasoning_effort,
+                )
             except Exception as e:
                 logger.exception("AI generation exception: %s", e)
 

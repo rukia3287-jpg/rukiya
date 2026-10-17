@@ -1,0 +1,22 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    # No host port: Ollama is reachable only by the internal Docker network.
+
+  gateway:
+    build: ./ollama-gateway
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:?Set LOCAL_LLM_API_KEY in deploy/.env}
+      LOCAL_LLM_TIMEOUT: ${LOCAL_LLM_TIMEOUT:-60}
+      OLLAMA_INTERNAL_URL: http://ollama:11434
+    ports:
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  ollama_data:

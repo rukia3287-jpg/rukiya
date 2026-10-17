@@ -45,10 +45,12 @@ class Executor:
         timeout = self.openrouter_timeout if provider.name == "openrouter" else self.gemini_timeout
         resolved_temperature = self.temperature if temperature is None else min(2.0, max(0.0, float(temperature)))
         resolved_max_tokens = self.max_completion_tokens if max_tokens is None else max(16, int(max_tokens))
+        reasoning_enabled = bool(kwargs.pop("reasoning_enabled", self.reasoning_enabled))
+        reasoning_effort = str(kwargs.pop("reasoning_effort", self.reasoning_effort))
         async with self.ai_semaphore:
             try:
                 return await asyncio.wait_for(
-                    provider.generate(messages=messages, max_tokens=resolved_max_tokens, temperature=resolved_temperature, reasoning_enabled=self.reasoning_enabled, reasoning_effort=self.reasoning_effort, **kwargs),
+                    provider.generate(messages=messages, max_tokens=resolved_max_tokens, temperature=resolved_temperature, reasoning_enabled=reasoning_enabled, reasoning_effort=reasoning_effort, **kwargs),
                     timeout=timeout
                 )
             except asyncio.TimeoutError:

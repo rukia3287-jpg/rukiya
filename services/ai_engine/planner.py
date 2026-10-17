@@ -84,6 +84,10 @@ class Planner:
         if search_required and freshness_required:
             complexity += 0.2
         complexity = round(min(1.0, complexity), 2)
+        # The controller's hint can raise effort for multi-step tasks, but never
+        # lower the planner's own estimate or override serious-intent protections.
+        hint = max(0.0, min(1.0, float(getattr(request, "complexity_hint", 0.0) or 0.0)))
+        complexity = round(max(complexity, hint), 2)
 
         # 4. Determine Intent
         intent = request.intent or "chatter"

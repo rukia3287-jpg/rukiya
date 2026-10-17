@@ -94,7 +94,14 @@ class AIEngine:
         if gemini and hasattr(gemini, "set_health_tracker"):
             gemini.set_health_tracker(self.health_tracker)
 
-    async def _generate(self, provider: AIProvider, messages: List[dict], *, track_health: bool = True) -> AIProviderResult:
+    async def _generate(
+        self,
+        provider: AIProvider,
+        messages: List[dict],
+        *,
+        track_health: bool = True,
+        reasoning_effort: Optional[str] = None,
+    ) -> AIProviderResult:
         """Dispatch one generation call (primary, backup or repair).
 
         Every dispatch counts toward the global daily cap, whether it succeeds or not.
@@ -127,13 +134,42 @@ class AIEngine:
                     retryable=False
                 )
             )
-        res = await self.executor.execute_generate(provider, messages)
+        effort_kwargs = {}
+        if reasoning_effort in {"low", "medium", "high"}:
+            effort_kwargs["reasoning_effort"] = reasoning_effort
+        res = await self.executor.execute_generate(provider, messages, **effort_kwargs)
         if track_health:
             self.health_tracker.record_call(f"{name}:generation", not bool(res.error), res.latency_ms, error=res.error_details)
         return res
 
     def get_fallback(self, intent: Optional[str] = None, language: str = ENGLISH) -> str:
         return localize_fallback(STATIC_FALLBACKS.get(intent or "default", STATIC_FALLBACKS["default"]), language)
+
+    async def _try_local_generation(
+        self,
+        messages: List[dict],
+        *,
+        reasoning_effort: Optional[str] = None,
+    ) -> Optional[AIProviderResult]:
+        """Try the optional local model without consuming cloud-provider quotas."""
+        provider = self.registry.get("local_llm")
+        if provider is None or not provider.is_configured():
+            return None
+        kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort in {"low", "medium", "high"} else {}
+        try:
+            result = await self.executor.execute_generate(provider, messages, **kwargs)
+        except Exception as exc:
+            logger.warning("Local LLM fallback raised an error: %s", exc)
+            return None
+        self.health_tracker.record_call(
+            "local_llm:generation", bool(result.text and not result.error), result.latency_ms,
+            error=result.error_details,
+        )
+        if result.text and not result.error:
+            logger.info("event=ai_engine_local_fallback provider=local_llm latency_ms=%.1f", result.latency_ms)
+            return result
+        logger.info("Local LLM fallback did not produce a response: %s", result.error or "empty response")
+        return None
 
     async def _execute_search_grounding(
         self,
@@ -275,6 +311,16 @@ class AIEngine:
         start_time = time.time()
         request_id = request.request_id
 
+        # Map task effort to provider reasoning effort where supported. Providers that
+        # do not expose this control safely ignore the extra keyword via their adapter.
+        reasoning_effort = {
+            "instant": "low",
+            "contextual": "low",
+            "standard": "medium",
+            "analytical": "medium",
+            "deep": "high",
+        }.get(str(getattr(request, "effort_level", "standard")).lower(), "medium")
+
         # 1. Planning
         plan = self.planner.plan(request)
 
@@ -325,17 +371,31 @@ class AIEngine:
         # 3. Execution per Route
         try:
             if route == RouteType.STATIC_FALLBACK:
-                candidate_text = fallback(plan.intent)
-                fallback_used = True
-                fallback_reason = "static_fallback"
-                provider_used = "static_fallback"
-                final_provider = "static_fallback"
+                # Local generation may handle ordinary conversation during a cloud outage,
+                # but never invent fresh facts when the plan requires search verification.
+                local_res = None
+                if not plan.search_required:
+                    local_messages = self.compiler.compile(request, plan)
+                    local_res = await self._try_local_generation(local_messages, reasoning_effort=reasoning_effort)
+                if local_res:
+                    candidate_text = local_res.text
+                    provider_used = "local_llm"
+                    final_provider = "local_llm"
+                    executed_route = "local_fallback"
+                    fallback_used = True
+                    fallback_reason = "cloud_providers_unavailable"
+                else:
+                    candidate_text = fallback(plan.intent)
+                    fallback_used = True
+                    fallback_reason = "static_fallback"
+                    provider_used = "static_fallback"
+                    final_provider = "static_fallback"
 
             elif route == RouteType.OPENROUTER_DIRECT:
                 provider_used = "openrouter"
                 final_provider = "openrouter"
                 messages = self.compiler.compile(request, plan)
-                res = await self._generate(openrouter, messages)  # type: ignore[arg-type]
+                res = await self._generate(openrouter, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
@@ -345,7 +405,7 @@ class AIEngine:
                     fallback_used = True
                     fallback_reason = "openrouter_failed"
                     if gemini and self.health_tracker.is_available("gemini:generation"):
-                        b_res = await self._generate(gemini, messages)  # type: ignore[arg-type]
+                        b_res = await self._generate(gemini, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                             provider_used = "gemini_backup"
@@ -354,30 +414,57 @@ class AIEngine:
                             fallback_used = False
                             fallback_reason = None
                         else:
+                            local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                            if local_res:
+                                candidate_text = local_res.text
+                                provider_used = "local_llm"
+                                final_provider = "local_llm"
+                                executed_route = "local_fallback"
+                                fallback_used = True
+                                fallback_reason = "cloud_providers_failed"
+                            else:
+                                candidate_text = fallback(plan.intent)
+                                provider_used = "static_fallback"
+                                final_provider = "static_fallback"
+                                executed_route = "static_fallback"
+                    else:
+                        local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                        if local_res:
+                            candidate_text = local_res.text
+                            provider_used = "local_llm"
+                            final_provider = "local_llm"
+                            executed_route = "local_fallback"
+                            fallback_used = True
+                            fallback_reason = "cloud_providers_unavailable"
+                        else:
                             candidate_text = fallback(plan.intent)
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                             executed_route = "static_fallback"
-                    else:
-                        candidate_text = fallback(plan.intent)
-                        provider_used = "static_fallback"
-                        final_provider = "static_fallback"
-                        executed_route = "static_fallback"
 
             elif route in (RouteType.GEMINI_DIRECT, RouteType.BACKUP):
                 provider_used = "gemini"
                 final_provider = "gemini"
                 messages = self.compiler.compile(request, plan)
-                res = await self._generate(gemini, messages)  # type: ignore[arg-type]
+                res = await self._generate(gemini, messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 if res.text and not res.error:
                     candidate_text = res.text
                 else:
-                    candidate_text = fallback(plan.intent)
-                    provider_used = "static_fallback"
-                    final_provider = "static_fallback"
-                    fallback_used = True
-                    fallback_reason = "gemini_generation_failed"
+                    local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                    if local_res:
+                        candidate_text = local_res.text
+                        provider_used = "local_llm"
+                        final_provider = "local_llm"
+                        executed_route = "local_fallback"
+                        fallback_used = True
+                        fallback_reason = "gemini_generation_failed"
+                    else:
+                        candidate_text = fallback(plan.intent)
+                        provider_used = "static_fallback"
+                        final_provider = "static_fallback"
+                        fallback_used = True
+                        fallback_reason = "gemini_generation_failed"
 
             elif route in (RouteType.HYBRID, RouteType.GEMINI_SEARCH, RouteType.CONSENSUS):
                 search_attempted = True
@@ -424,7 +511,7 @@ class AIEngine:
                             search_succeeded=True,
                             verified_current_information=True
                         )
-                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
+                        gen_res = await self._generate(openrouter, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
                         elif sr.text.strip():
@@ -434,11 +521,20 @@ class AIEngine:
                             fallback_used = True
                             fallback_reason = "openrouter_failed"
                         else:
-                            candidate_text = fallback(plan.intent)
-                            provider_used = "static_fallback"
-                            final_provider = "static_fallback"
-                            fallback_used = True
-                            fallback_reason = "all_providers_failed"
+                            local_res = await self._try_local_generation(hybrid_messages, reasoning_effort=reasoning_effort)
+                            if local_res:
+                                candidate_text = local_res.text
+                                provider_used = "local_llm"
+                                final_provider = "local_llm"
+                                executed_route = "local_fallback"
+                                fallback_used = True
+                                fallback_reason = "openrouter_failed_after_verified_search"
+                            else:
+                                candidate_text = fallback(plan.intent)
+                                provider_used = "static_fallback"
+                                final_provider = "static_fallback"
+                                fallback_used = True
+                                fallback_reason = "all_providers_failed"
                 else:
                     # Search failed fast (e.g. 429 rate limit or quota exceeded)
                     verified_current_information = False
@@ -465,11 +561,11 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        gen_res = await self._generate(openrouter, hybrid_messages)  # type: ignore[arg-type]
+                        gen_res = await self._generate(openrouter, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if gen_res.text and not gen_res.error:
                             candidate_text = gen_res.text
                         elif gemini and self.health_tracker.is_available("gemini:generation"):
-                            b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
+                            b_res = await self._generate(gemini, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                             if b_res.text and not b_res.error:
                                 candidate_text = b_res.text
                                 provider_used = "degraded_hybrid (gemini)"
@@ -494,7 +590,7 @@ class AIEngine:
                             search_failure_reason=fallback_reason,
                             verified_current_information=False
                         )
-                        b_res = await self._generate(gemini, hybrid_messages)  # type: ignore[arg-type]
+                        b_res = await self._generate(gemini, hybrid_messages, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
                         if b_res.text and not b_res.error:
                             candidate_text = b_res.text
                         else:
@@ -508,11 +604,26 @@ class AIEngine:
 
         except Exception as e:
             logger.exception("AI Engine execution exception: %s", e)
-            candidate_text = fallback(plan.intent)
-            fallback_used = True
-            fallback_reason = "exception"
-            provider_used = "static_fallback"
-            final_provider = "static_fallback"
+            local_res = None
+            if not plan.search_required:
+                try:
+                    local_messages = self.compiler.compile(request, plan)
+                    local_res = await self._try_local_generation(local_messages, reasoning_effort=reasoning_effort)
+                except Exception:
+                    local_res = None
+            if local_res:
+                candidate_text = local_res.text
+                provider_used = "local_llm"
+                final_provider = "local_llm"
+                executed_route = "local_fallback"
+                fallback_used = True
+                fallback_reason = "cloud_execution_exception"
+            else:
+                candidate_text = fallback(plan.intent)
+                fallback_used = True
+                fallback_reason = "exception"
+                provider_used = "static_fallback"
+                final_provider = "static_fallback"
             error_msg = str(e)
         except asyncio.CancelledError:
             # A cancelled request (e.g. the YouTube monitor stopping) was not served.
@@ -545,7 +656,7 @@ class AIEngine:
                 # Generator lambda for repair
                 async def _repair_gen(msgs: List[dict]) -> AIProviderResult:
                     target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
-                    return await self._generate(target_prov, msgs, track_health=False)  # type: ignore[arg-type]
+                    return await self._generate(target_prov, msgs, track_health=False, reasoning_effort=reasoning_effort)  # type: ignore[arg-type]
 
                 repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
                     initial_text=candidate_text,
