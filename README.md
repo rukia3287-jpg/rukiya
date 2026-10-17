@@ -391,5 +391,9 @@ Environment switches:
 - `RUKIYA_ADAPTIVE_BEHAVIOR_ENABLED=true` enables adaptive effort and style policy (default: enabled).
 - `RUKIYA_ADAPTIVE_BEHAVIOR_ENABLED=false` disables adaptive policy hints.
 - `RUKIYA_LOCAL_RULES_ENABLED=true` enables deterministic local greeting/thanks replies (default: disabled to preserve existing reply behavior).
+- `LOCAL_LLM_BASE_URL` enables the optional OpenAI-compatible local/private generation endpoint (for example, `http://127.0.0.1:11434/v1` for Ollama on the same host).
+- `LOCAL_LLM_MODEL` selects the model name (default: `qwen2.5:3b`); `LOCAL_LLM_API_KEY` is optional; `LOCAL_LLM_TIMEOUT` defaults to 8 seconds.
+
+When configured, the local model is attempted after cloud generation fails, before deterministic fallback, for ordinary conversation. It may also synthesize already-verified search evidence. It is deliberately **not** used to invent fresh/current facts when search verification fails. It does not consume cloud generation quota. If Rukiya runs on Render or another remote host, `127.0.0.1` refers to that host, not your personal PC; the model endpoint must be reachable from the bot process. Leave `LOCAL_LLM_BASE_URL` empty to keep the provider disabled.
 
 The effort labels are routing policies, not an IQ measurement. Higher effort is not a guarantee of correctness; verification and safety checks remain necessary.
