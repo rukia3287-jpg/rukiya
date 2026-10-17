@@ -145,6 +145,32 @@ class AIEngine:
     def get_fallback(self, intent: Optional[str] = None, language: str = ENGLISH) -> str:
         return localize_fallback(STATIC_FALLBACKS.get(intent or "default", STATIC_FALLBACKS["default"]), language)
 
+    async def _try_local_generation(
+        self,
+        messages: List[dict],
+        *,
+        reasoning_effort: Optional[str] = None,
+    ) -> Optional[AIProviderResult]:
+        """Try the optional local model without consuming cloud-provider quotas."""
+        provider = self.registry.get("local_llm")
+        if provider is None or not provider.is_configured():
+            return None
+        kwargs = {"reasoning_effort": reasoning_effort} if reasoning_effort in {"low", "medium", "high"} else {}
+        try:
+            result = await self.executor.execute_generate(provider, messages, **kwargs)
+        except Exception as exc:
+            logger.warning("Local LLM fallback raised an error: %s", exc)
+            return None
+        self.health_tracker.record_call(
+            "local_llm:generation", bool(result.text and not result.error), result.latency_ms,
+            error=result.error_details,
+        )
+        if result.text and not result.error:
+            logger.info("event=ai_engine_local_fallback provider=local_llm latency_ms=%.1f", result.latency_ms)
+            return result
+        logger.info("Local LLM fallback did not produce a response: %s", result.error or "empty response")
+        return None
+
     async def _execute_search_grounding(
         self,
         query: str,
@@ -345,11 +371,25 @@ class AIEngine:
         # 3. Execution per Route
         try:
             if route == RouteType.STATIC_FALLBACK:
-                candidate_text = fallback(plan.intent)
-                fallback_used = True
-                fallback_reason = "static_fallback"
-                provider_used = "static_fallback"
-                final_provider = "static_fallback"
+                # Local generation may handle ordinary conversation during a cloud outage,
+                # but never invent fresh facts when the plan requires search verification.
+                local_res = None
+                if not plan.search_required:
+                    local_messages = self.compiler.compile(request, plan)
+                    local_res = await self._try_local_generation(local_messages, reasoning_effort=reasoning_effort)
+                if local_res:
+                    candidate_text = local_res.text
+                    provider_used = "local_llm"
+                    final_provider = "local_llm"
+                    executed_route = "local_fallback"
+                    fallback_used = True
+                    fallback_reason = "cloud_providers_unavailable"
+                else:
+                    candidate_text = fallback(plan.intent)
+                    fallback_used = True
+                    fallback_reason = "static_fallback"
+                    provider_used = "static_fallback"
+                    final_provider = "static_fallback"
 
             elif route == RouteType.OPENROUTER_DIRECT:
                 provider_used = "openrouter"
@@ -393,11 +433,20 @@ class AIEngine:
                 if res.text and not res.error:
                     candidate_text = res.text
                 else:
-                    candidate_text = fallback(plan.intent)
-                    provider_used = "static_fallback"
-                    final_provider = "static_fallback"
-                    fallback_used = True
-                    fallback_reason = "gemini_generation_failed"
+                    local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                    if local_res:
+                        candidate_text = local_res.text
+                        provider_used = "local_llm"
+                        final_provider = "local_llm"
+                        executed_route = "local_fallback"
+                        fallback_used = True
+                        fallback_reason = "gemini_generation_failed"
+                    else:
+                        candidate_text = fallback(plan.intent)
+                        provider_used = "static_fallback"
+                        final_provider = "static_fallback"
+                        fallback_used = True
+                        fallback_reason = "gemini_generation_failed"
 
             elif route in (RouteType.HYBRID, RouteType.GEMINI_SEARCH, RouteType.CONSENSUS):
                 search_attempted = True
@@ -454,11 +503,20 @@ class AIEngine:
                             fallback_used = True
                             fallback_reason = "openrouter_failed"
                         else:
-                            candidate_text = fallback(plan.intent)
-                            provider_used = "static_fallback"
-                            final_provider = "static_fallback"
-                            fallback_used = True
-                            fallback_reason = "all_providers_failed"
+                            local_res = await self._try_local_generation(hybrid_messages, reasoning_effort=reasoning_effort)
+                            if local_res:
+                                candidate_text = local_res.text
+                                provider_used = "local_llm"
+                                final_provider = "local_llm"
+                                executed_route = "local_fallback"
+                                fallback_used = True
+                                fallback_reason = "openrouter_failed_after_verified_search"
+                            else:
+                                candidate_text = fallback(plan.intent)
+                                provider_used = "static_fallback"
+                                final_provider = "static_fallback"
+                                fallback_used = True
+                                fallback_reason = "all_providers_failed"
                 else:
                     # Search failed fast (e.g. 429 rate limit or quota exceeded)
                     verified_current_information = False
@@ -528,11 +586,26 @@ class AIEngine:
 
         except Exception as e:
             logger.exception("AI Engine execution exception: %s", e)
-            candidate_text = fallback(plan.intent)
-            fallback_used = True
-            fallback_reason = "exception"
-            provider_used = "static_fallback"
-            final_provider = "static_fallback"
+            local_res = None
+            if not plan.search_required:
+                try:
+                    local_messages = self.compiler.compile(request, plan)
+                    local_res = await self._try_local_generation(local_messages, reasoning_effort=reasoning_effort)
+                except Exception:
+                    local_res = None
+            if local_res:
+                candidate_text = local_res.text
+                provider_used = "local_llm"
+                final_provider = "local_llm"
+                executed_route = "local_fallback"
+                fallback_used = True
+                fallback_reason = "cloud_execution_exception"
+            else:
+                candidate_text = fallback(plan.intent)
+                fallback_used = True
+                fallback_reason = "exception"
+                provider_used = "static_fallback"
+                final_provider = "static_fallback"
             error_msg = str(e)
         except asyncio.CancelledError:
             # A cancelled request (e.g. the YouTube monitor stopping) was not served.
