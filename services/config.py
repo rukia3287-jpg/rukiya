@@ -32,6 +32,13 @@ class Config:
     gemini_search_daily_limit: int = 450
     gemini_search_cache_ttl: int = 300
 
+    # Optional local/private OpenAI-compatible generation endpoint (e.g. Ollama /v1).
+    # Empty base URL keeps the provider disabled and has no runtime cost.
+    local_llm_base_url: str = ""
+    local_llm_model: str = "qwen2.5:3b"
+    local_llm_api_key: str = ""
+    local_llm_timeout: float = 8.0
+
     ai_max_repair_attempts: int = 2
     ai_max_planner_steps: int = 4
     max_ai_concurrency: int = 3
@@ -133,6 +140,10 @@ class Config:
         self.openrouter_model = os.getenv("OPENROUTER_MODEL", self.openrouter_model)
         self.openrouter_endpoint = os.getenv("OPENROUTER_ENDPOINT", self.openrouter_endpoint)
         self.gemini_model = os.getenv("GEMINI_MODEL", self.gemini_model)
+        self.local_llm_base_url = os.getenv("LOCAL_LLM_BASE_URL", self.local_llm_base_url).strip().rstrip("/")
+        self.local_llm_model = os.getenv("LOCAL_LLM_MODEL", self.local_llm_model).strip() or self.local_llm_model
+        self.local_llm_api_key = os.getenv("LOCAL_LLM_API_KEY", self.local_llm_api_key).strip()
+        self.local_llm_timeout = self._env_number("LOCAL_LLM_TIMEOUT", self.local_llm_timeout, float)
 
         gemini_search_env = os.getenv("GEMINI_SEARCH_ENABLED")
         if gemini_search_env is not None:
