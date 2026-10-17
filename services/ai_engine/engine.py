@@ -414,15 +414,33 @@ class AIEngine:
                             fallback_used = False
                             fallback_reason = None
                         else:
+                            local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                            if local_res:
+                                candidate_text = local_res.text
+                                provider_used = "local_llm"
+                                final_provider = "local_llm"
+                                executed_route = "local_fallback"
+                                fallback_used = True
+                                fallback_reason = "cloud_providers_failed"
+                            else:
+                                candidate_text = fallback(plan.intent)
+                                provider_used = "static_fallback"
+                                final_provider = "static_fallback"
+                                executed_route = "static_fallback"
+                    else:
+                        local_res = None if plan.search_required else await self._try_local_generation(messages, reasoning_effort=reasoning_effort)
+                        if local_res:
+                            candidate_text = local_res.text
+                            provider_used = "local_llm"
+                            final_provider = "local_llm"
+                            executed_route = "local_fallback"
+                            fallback_used = True
+                            fallback_reason = "cloud_providers_unavailable"
+                        else:
                             candidate_text = fallback(plan.intent)
                             provider_used = "static_fallback"
                             final_provider = "static_fallback"
                             executed_route = "static_fallback"
-                    else:
-                        candidate_text = fallback(plan.intent)
-                        provider_used = "static_fallback"
-                        final_provider = "static_fallback"
-                        executed_route = "static_fallback"
 
             elif route in (RouteType.GEMINI_DIRECT, RouteType.BACKUP):
                 provider_used = "gemini"
