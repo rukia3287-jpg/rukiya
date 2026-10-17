@@ -373,3 +373,23 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 
 
 > Permission note: `/ask` is available to everyone, but `post_to_yt=true`, `/say`, `/start`, `/stop`, and `/auto_reply` require server Administrator permissions.
+
+
+---
+
+## 🧠 Adaptive Hybrid Conversation Behavior
+
+Rukiya can adapt task effort separately from conversation style.
+
+- The adaptive controller estimates task complexity locally, without an extra model call.
+- Effort hints influence planning and, for providers that support it, per-request OpenRouter reasoning effort.
+- Style instructions adapt to task type and serious-topic handling while retaining the existing Rukiya persona and safety validation.
+- Local deterministic replies can handle exact greetings and simple thanks without calling a model.
+
+Environment switches:
+
+- `RUKIYA_ADAPTIVE_BEHAVIOR_ENABLED=true` enables adaptive effort and style policy (default: enabled).
+- `RUKIYA_ADAPTIVE_BEHAVIOR_ENABLED=false` disables adaptive policy hints.
+- `RUKIYA_LOCAL_RULES_ENABLED=true` enables deterministic local greeting/thanks replies (default: disabled to preserve existing reply behavior).
+
+The effort labels are routing policies, not an IQ measurement. Higher effort is not a guarantee of correctness; verification and safety checks remain necessary.
