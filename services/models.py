@@ -24,6 +24,7 @@ class ChatMessage:
     is_moderator: bool = False
     raw_event: Optional[Any] = None
     guild_id: Optional[str] = None
+    reply_to_text: Optional[str] = None
 
     @property
     def author_repr(self) -> str:

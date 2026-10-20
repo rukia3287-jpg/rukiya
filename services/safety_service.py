@@ -183,7 +183,7 @@ def localize_fallback(english_text: str, language: str = ENGLISH) -> str:
     return FALLBACK_TRANSLATIONS.get(english_text, {}).get(language, english_text)
 
 
-def validate_rukiya_response(reply: str, fallback: str = DEFAULT_VALIDATOR_FALLBACK) -> str:
+def validate_rukiya_response(reply: str, fallback: str = DEFAULT_VALIDATOR_FALLBACK, *, max_sentences: int = 1) -> str:
     """
     Enforce the public-facing persona limits even if the model ignores them.
     Preserves exact contract with V1 regression tests.
@@ -203,9 +203,9 @@ def validate_rukiya_response(reply: str, fallback: str = DEFAULT_VALIDATOR_FALLB
             logger.critical("Secret/prompt leakage detected in output! Suppressing.")
             return fallback
 
-    # Limit to at most 1 sentence for live chat safety contract
+    # Legacy callers keep one sentence; chat routes explicitly permit two.
     sentences = re.split(r"(?<=[.!?])\s+", cleaned)
-    cleaned = " ".join(sentences[:1]).strip()
+    cleaned = " ".join(sentences[:max(1, min(2, max_sentences))]).strip()
 
     # Asterisks check or emoji spam check (> 1 emoji in output)
     if cleaned.count("*") > 0 or len(re.findall(r"[\U0001F300-\U0001FAFF]", cleaned)) > 1:
@@ -263,7 +263,7 @@ class SafetyService:
         Returns (is_safe, sanitized_or_fallback_text).
         """
         fallback = self.get_fallback(intent, language)
-        validated = validate_rukiya_response(response_text, fallback=fallback)
+        validated = validate_rukiya_response(response_text, fallback=fallback, max_sentences=1 if intent in SERIOUS_INTENT_INSTRUCTIONS else 2)
         is_safe = (validated != fallback) or (response_text.strip() == fallback)
         return is_safe, validated
 

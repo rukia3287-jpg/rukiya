@@ -104,7 +104,13 @@ class RukiyaCog(commands.Cog):
         # Check if called by name
         is_named = bool(self._name_pattern.search(message.content))
 
-        if not (is_tagged or is_named):
+        reference = getattr(message, "reference", None)
+        referenced = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
+        reference_author = getattr(referenced, "author", None)
+        is_reply_to_bot = bool(bot_user and getattr(reference_author, "id", None) == bot_user.id)
+        is_direct_message = hasattr(message, "guild") and message.guild is None
+
+        if not (is_tagged or is_named or is_reply_to_bot or is_direct_message):
             return
 
         # Cooldown is per Discord user, so one user's recent reply cannot
@@ -141,6 +147,7 @@ class RukiyaCog(commands.Cog):
                         platform="discord",
                         guild_id=str(message.guild.id) if getattr(message, "guild", None) else None,
                         channel_id=str(message.channel.id) if getattr(message.channel, "id", None) else None,
+                        reply_to_text=getattr(referenced, "content", None) if is_reply_to_bot else None,
                         user_id=str(message.author.id),
                         bypass_trigger=True,
                         bypass_cooldown=True
@@ -277,7 +284,7 @@ class RukiyaCog(commands.Cog):
                     "role": "user",
                     "content": (
                         f"[Stream viewer '{author}' says]: {message}\n\n"
-                        "Reply as Rukiya — short, punchy, in-character. 1-3 sentences max."
+                        "Reply as Rukiya — short, punchy, in-character. 1-2 short sentences max."
                     ),
                 },
             ],
@@ -301,6 +308,7 @@ class RukiyaCog(commands.Cog):
                 content = validate_rukiya_response(
                     content.strip(),
                     fallback=localize_fallback(DEFAULT_VALIDATOR_FALLBACK, detect_reply_language(message)),
+                    max_sentences=2,
                 )
                 # Hard cap
                 if len(content) > 300:
@@ -569,7 +577,7 @@ class RukiyaCog(commands.Cog):
             description=(
                 "Soul Reaper of the Gotei 13, Lieutenant of the Thirteenth Division.\n"
                 "Wielder of **Sode no Shirayuki** (袖白雪, *Sleeved White Snow*), the most beautiful Zanpakutō in the Soul Society.\n\n"
-                "**Personality**: Proud, sharp-tongued, tsundere, battle-hardened, with a secret soft side."
+                "**Personality**: Composed, perceptive, dry-witted and quietly protective, with her own judgment."
             ),
             color=discord.Color.dark_red()
         )
