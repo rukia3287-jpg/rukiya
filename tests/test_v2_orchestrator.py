@@ -114,7 +114,8 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         response = await self.orchestrator.process_message(msg)
         self.assertIsNotNone(response)
         self.assertTrue(response.is_fallback)
-        self.assertEqual(response.text, "Welcome in, chat.")
+        # The question after the greeting takes precedence.
+        self.assertEqual(response.text, "Give me a second, chat.")
 
     async def test_prompt_injection_blocked_in_orchestrator(self):
         msg = ChatMessage(

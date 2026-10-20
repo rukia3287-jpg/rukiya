@@ -1,5 +1,7 @@
 # 🗡️ Rukiya V2 — Discord & YouTube Livestream AI Bot
 
+Conversation behavior and verification: [Rukiya chat update](RUKIYA_CHAT_UPDATE.md).
+
 Current command, privacy, operator setup and validation details: [Rukiya update report](RUKIYA_UPDATE_REPORT.md).
 
 
@@ -73,7 +75,7 @@ Rukiya V2 introduces a major architectural evolution by establishing strict serv
 
 5. **Safety Layer & Prompt Injection Defense (`services/safety_service.py`)**:
    - Pre-generation input filtering for prompt injection patterns (`ignore previous instructions`, `DAN mode`, `reveal system prompt`). Viewer messages, remembered facts, recent chat and web evidence are passed to the model only inside blocks the system prompt declares untrusted.
-   - Post-generation output enforcement (no stage directions such as `*smiles*`, `(smiles)` or `[laughs]`, max 1 emoji, single sentence limit, no secret/prompt leakage).
+   - Post-generation output enforcement (no stage directions such as `*smiles*`, `(smiles)` or `[laughs]`, max 1 emoji, two-sentence chat limit (one for serious replies and legacy validator defaults), no secret/prompt leakage).
    - In-character, deterministic single-sentence fallbacks based on intent (`"Welcome in, chat."`, `"Give me a second, chat."`). Serious messages get caring fallbacks instead (the crisis one points to someone they trust or a local crisis helpline), and the model is told to drop all teasing for them.
    - Fallbacks follow the viewer's language and script (`services/language.py`): English, Hinglish (Roman Hindi), Roman Telugu, Hindi (Devanagari) and Telugu script, with Romanized messages answered in Latin letters. Other languages get English fallbacks.
    - Discord and YouTube share this contract: when the orchestrator declines to answer (blocked input, hard rule, decision), Discord stays silent (`/ask` shows a neutral ephemeral notice) rather than retrying the text through a raw model call.

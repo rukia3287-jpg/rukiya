@@ -98,15 +98,15 @@ class Critic:
                 repair_instruction=f"Shorten response to strictly under {self.max_length} characters (1 short sentence)."
             )
 
-        # Check sentence count (max 3 sentences)
-        sentences = [s for s in re.split(r"[.!?]+", text) if s.strip()]
-        if len(sentences) > 3:
-            reasons.append(f"Too many sentences ({len(sentences)} > 3)")
+        # Keep generation and output validation on the same two-sentence budget.
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if len(sentences) > 2:
+            reasons.append(f"Too many sentences ({len(sentences)} > 2)")
             return CriticReport(
                 verdict=CriticVerdict.REPAIR,
                 score=0.65,
                 reasons=reasons,
-                repair_instruction="Condense into 1 short sentence."
+                repair_instruction="Condense into one or two short sentences."
             )
 
         # 6. Anti-Repetition Check against recent bot replies

@@ -34,7 +34,7 @@ from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
 from services.language import ENGLISH, detect_reply_language
-from services.safety_service import FALLBACK_INTENTS, localize_fallback, validate_rukiya_response
+from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, FALLBACK_INTENTS, localize_fallback, validate_rukiya_response
 
 logger = logging.getLogger(__name__)
 
@@ -579,7 +579,7 @@ class AIEngine:
         # 5. Output Validation
         if not fallback_used:
             fallback_text = fallback(plan.intent)
-            validated = validate_rukiya_response(candidate_text, fallback=fallback_text)
+            validated = validate_rukiya_response(candidate_text, fallback=fallback_text, max_sentences=1 if plan.intent in SERIOUS_INTENT_INSTRUCTIONS else 2)
             if validated == fallback_text and candidate_text.strip() != fallback_text:
                 fallback_used = True
                 fallback_reason = fallback_reason or "output_safety_rejected"

@@ -11,6 +11,7 @@ from typing import List, Optional
 
 from services.ai_engine.models import AIEngineRequest, CostClass, Plan, SearchQuery
 from services.config import Config
+from services.persona import contains_phrase
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
@@ -51,17 +52,19 @@ class Planner:
         # 1. Determine Search & Freshness Requirement
         is_casual_conversation = (
             request.intent in ("greeting", "compliment", "offtopic")
-            or any(g in text_lower for g in [
+            or contains_phrase(text_lower, [
                 "how are you", "how's it going", "how r u", "doing today",
-                "hello", "hey", "hi rukiya", "welcome", "good morning", "good evening"
+                "who are you", "what is your name", "what is my name", "what is my favorite",
+                "do you remember", "tell me about yourself",
+                "what is your", "who is your", "what is my favourite"
             ])
-        ) and not any(kw in text_lower for kw in [
-            "patch", "update", "news", "score", "release date", "codes", "search", "who won", "banner"
+        ) and not contains_phrase(text_lower, [
+            "patch", "update", "updates", "news", "score", "release date", "codes", "search", "who won", "banner", "price", "schedule", "latest", "current"
         ])
 
-        freshness_required = any(word in text_lower for word in FRESHNESS_TRIGGERS) and not is_casual_conversation
+        freshness_required = contains_phrase(text_lower, FRESHNESS_TRIGGERS) and not is_casual_conversation
         explicit_search = (
-            any(kw in text_lower for kw in SEARCH_KEYWORDS)
+            contains_phrase(text_lower, SEARCH_KEYWORDS)
             and ("?" in text_lower or len(text_lower.split()) > 3)
             and not is_casual_conversation
         )
@@ -147,7 +150,7 @@ class Planner:
 
         # Detect category
         category = "general"
-        if any(gk in cleaned.lower() for gk in GAME_KEYWORDS):
+        if contains_phrase(cleaned, GAME_KEYWORDS):
             category = "game"
         elif any(nk in cleaned.lower() for nk in ["news", "breaking", "happened"]):
             category = "news"
@@ -158,7 +161,7 @@ class Planner:
         time_scope = date_str
 
         # Primary query
-        primary_q = f"{cleaned} {date_str}".strip() if any(w in cleaned.lower() for w in FRESHNESS_TRIGGERS) else cleaned
+        primary_q = f"{cleaned} {date_str}".strip() if contains_phrase(cleaned, FRESHNESS_TRIGGERS) else cleaned
         queries = [SearchQuery(query=primary_q, category=category, time_scope=time_scope)]
 
         # Secondary query for games or releases if complex

@@ -144,6 +144,7 @@ class RukiyaOrchestrator:
                     persistent_memory=persistent_memory if decision.memory_needed else None,
                     stream_memory=session_context if decision.memory_needed else None,
                     recent_messages=recent_messages,
+                    reply_to_text=message.reply_to_text,
                 )
                 engine_res = await self.ai_engine.process(engine_req)
                 generated = GeneratedResponse(
@@ -163,7 +164,9 @@ class RukiyaOrchestrator:
                 persistent_memory=persistent_memory if decision.memory_needed else None,
                 stream_memory=session_context if decision.memory_needed else None,
                 recent_messages=recent_messages,
-                decision=decision
+                decision=decision,
+                canonical_id=user.canonical_id,
+                reply_to_text=message.reply_to_text,
             )
             try:
                 generated = await self.ai_service.generate(prompt_messages, author=user.display_name)
@@ -227,6 +230,7 @@ class RukiyaOrchestrator:
         guild_id: Optional[str] = None,
         channel_id: Optional[str] = None,
         video_id: Optional[str] = None,
+        reply_to_text: Optional[str] = None,
     ) -> Optional[str]:
         """Convenience method for text-based triggers (e.g. slash /ask or Discord listener)."""
         msg = ChatMessage(
@@ -235,7 +239,7 @@ class RukiyaOrchestrator:
             user_id=user_id or author,
             username=author,
             display_name=author,
-            text=text, guild_id=guild_id, channel_id=channel_id, video_id=video_id,
+            text=text, guild_id=guild_id, channel_id=channel_id, video_id=video_id, reply_to_text=reply_to_text,
         )
         res = await self.process_message(msg, bypass_trigger=bypass_trigger, bypass_cooldown=bypass_cooldown)
         return res.text if res else None

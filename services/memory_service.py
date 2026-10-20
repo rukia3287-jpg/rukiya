@@ -921,10 +921,10 @@ class MemoryService:
             return []
         try:
             rows = conn.execute("""
-                SELECT role, author, text, timestamp FROM recent_messages
+                SELECT canonical_id, role, author, text, timestamp FROM recent_messages
                 WHERE session_id=? ORDER BY timestamp DESC LIMIT ?
             """, (sid, limit)).fetchall()
-            return [{"role": r["role"], "author": r["author"], "text": r["text"], "timestamp": float(r["timestamp"])} for r in reversed(rows)]
+            return [{"canonical_id": r["canonical_id"], "role": r["role"], "author": r["author"], "text": r["text"], "timestamp": float(r["timestamp"])} for r in reversed(rows)]
         except Exception as e:
             logger.error("Error retrieving recent messages: %s", e)
             return []

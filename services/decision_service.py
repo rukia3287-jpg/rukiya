@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from services.config import Config
+from services.persona import contains_phrase
 from services.models import ChatMessage, ResponseDecision, UserIdentity
 
 logger = logging.getLogger(__name__)
@@ -129,27 +130,22 @@ class DecisionService:
         if any(re.search(p, lower) for p in self.SENSITIVE_PATTERNS):
             return "sensitive"
 
-        # Greetings
-        greeting_words = ("hi", "hello", "hey", "sup", "yo", "namaste", "konnichiwa", "welcome")
-        if any(re.search(rf"\b{w}\b", lower) for w in greeting_words):
-            return "greeting"
+        # A salutation or compliment must not hide the actual request.
+        if "?" in cleaned or contains_phrase(lower, ("who", "what", "where", "when", "why", "how", "kya", "kyun", "kaun", "explain", "compare")):
+            return "question"
+        if contains_phrase(lower, ("help", "stuck", "guide", "madad", "tips")):
+            return "help"
 
-        # Compliments
+        greeting_words = ("hi", "hello", "hey", "sup", "yo", "namaste", "konnichiwa", "welcome")
+        if contains_phrase(lower, greeting_words):
+            return "greeting"
         compliment_words = ("cute", "pretty", "beautiful", "kawaii", "best girl", "smart", "love you", "cool")
-        if any(w in lower for w in compliment_words):
+        if contains_phrase(lower, compliment_words):
             return "compliment"
 
-        # Questions
-        if "?" in cleaned or any(re.search(rf"\b{w}\b", lower) for w in ("who", "what", "where", "when", "why", "how", "kya", "kyun", "kaun")):
-            return "question"
-
-        # Spam / flood signals
-        if len(cleaned) > 200 or len(set(cleaned)) < 5:
+        # Long, meaningful messages and brief acknowledgments are not inherently spam.
+        if len(cleaned) >= 12 and len(set(re.sub(r"\s", "", lower))) < 5:
             return "spam"
-
-        # Help
-        if any(w in lower for w in ("help", "stuck", "guide", "madad", "tips")):
-            return "help"
 
         return "chatter"
 
