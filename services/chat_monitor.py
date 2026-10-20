@@ -45,6 +45,7 @@ class ChatMonitor:
         self.subscribers: list[SubscriberType] = []
         self._monitor_task: Optional[asyncio.Task] = None
         self._stopping = False
+        self._lifecycle_lock = asyncio.Lock()
         self._poll_interval = float(self._cfg("poll_interval", 10.0))
         self._next_poll_delay = self._poll_interval
         self._send_cooldown = float(self._cfg("send_cooldown", 2.0))
@@ -100,7 +101,7 @@ class ChatMonitor:
                     message[:120],
                 )
 
-    def start_monitoring(self, live_chat_id: str, video_id: Optional[str] = None, *, start_background: bool = True) -> bool:
+    def start_monitoring(self, live_chat_id: str, video_id: Optional[str] = None, *, start_background: bool = True, persist_session: bool = True) -> bool:
         """Start monitoring, or reject while the prior task is still winding down."""
         if self.is_running or self._stopping or (self._monitor_task and not self._monitor_task.done()):
             logger.warning("Start rejected: an existing monitor task is active or stopping")
@@ -117,7 +118,7 @@ class ChatMonitor:
         vid = video_id or "unknown"
         self.stream_session_id = f"stream_{vid}_{int(time.time())}"
         mem_svc = getattr(self.orchestrator, "memory_service", None)
-        if mem_svc:
+        if mem_svc and persist_session:
             mem_svc.start_stream_session(vid, session_id=self.stream_session_id)
 
         logger.info("Started monitoring chat: %s (session %s)", live_chat_id, self.stream_session_id)
@@ -132,7 +133,36 @@ class ChatMonitor:
         logger.info("Background monitor loop started")
         return True
 
-    def stop_monitoring(self) -> None:
+    async def start_async(self, live_chat_id: str, video_id: Optional[str] = None) -> bool:
+        """Production entry point: database session writes stay off the event loop."""
+        async with self._lifecycle_lock:
+            if self.is_running or self._stopping or (self._monitor_task and not self._monitor_task.done()):
+                return False
+            # Set up state without launching a poll before the session is durable/queued.
+            if not self.start_monitoring(live_chat_id, video_id, start_background=False, persist_session=False):
+                return False
+            mem = getattr(self.orchestrator, "memory_service", None)
+            try:
+                if mem:
+                    await mem.run_async(mem.start_stream_session, video_id or "unknown", session_id=self.stream_session_id)
+                self._monitor_task = asyncio.create_task(self._monitor_loop(), name="youtube-chat-monitor")
+                return True
+            except BaseException:
+                session = self.stream_session_id
+                self.stop_monitoring(persist_session=False)
+                if mem and session:
+                    await mem.run_async(mem.end_stream_session, session)
+                raise
+
+    async def stop_async(self) -> None:
+        async with self._lifecycle_lock:
+            session = self.stream_session_id
+            self.stop_monitoring(persist_session=False)
+            mem = getattr(self.orchestrator, "memory_service", None)
+            if mem and session:
+                await mem.run_async(mem.end_stream_session, session)
+
+    def stop_monitoring(self, *, persist_session: bool = True) -> None:
         """Request cancellation; the loop's finally block logs confirmed completion."""
         task = self._monitor_task
         self.is_running = False
@@ -140,12 +170,13 @@ class ChatMonitor:
 
         # End stream session in memory service
         mem_svc = getattr(self.orchestrator, "memory_service", None)
-        if mem_svc and self.stream_session_id:
+        if mem_svc and self.stream_session_id and persist_session:
             mem_svc.end_stream_session(self.stream_session_id)
 
         if task and not task.done():
-            task.cancel()
-            logger.info("Monitor task cancellation requested")
+            if task is not asyncio.current_task():
+                task.cancel()
+                logger.info("Monitor task cancellation requested")
         else:
             self._stopping = False
         self.live_chat_id = self.video_id = self.next_page_token = self.stream_session_id = None
@@ -215,7 +246,7 @@ class ChatMonitor:
                 if err.stops_monitoring:
                     # e.g. the live chat ended or quota/auth failed: no later send can work.
                     logger.error("YouTube send failed permanently (%s); stopping chat monitor", self.last_error)
-                    self.stop_monitoring()
+                    await self.stop_async()
                     return False
         await asyncio.sleep(self._send_cooldown)
         return bool(sent)
@@ -269,10 +300,7 @@ class ChatMonitor:
                     logger.error("YouTube quota exhausted; monitoring stops without retry")
                 else:
                     logger.error("YouTube polling failed permanently (%s); monitoring stops without retry", self.last_error)
-                self.stop_monitoring()
-                # A task that cancels itself must reach an await point to
-                # receive (and let _monitor_loop handle) CancelledError.
-                await asyncio.sleep(0)
+                await self.stop_async()
                 return
             if err.kind == "invalid":
                 self.next_page_token = None  # e.g. pageTokenInvalid: start over instead of repeating it

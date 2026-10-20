@@ -143,6 +143,10 @@ class IdentityService:
         # may follow a link; username/display-name fallback keys are mutable labels.
         canonical_id = self._verified_mappings.get(raw_canonical, raw_canonical) if raw_uid else raw_canonical
         linked = canonical_id != raw_canonical
+        base_canonical_id = canonical_id
+        from services.scopes import persistent_scope, scoped_identity
+        scope = persistent_scope(message)
+        canonical_id = scoped_identity(canonical_id, scope)
 
         # Check persistent storage if available
         if self.memory_service:
@@ -160,7 +164,7 @@ class IdentityService:
 
         # Create new identity. Through a link, the profile belongs to the primary account,
         # so its platform and user ID come from the primary canonical ID.
-        profile_platform, profile_uid = canonical_id.split(":", 1) if linked else (platform, raw_uid)
+        profile_platform, profile_uid = base_canonical_id.split(":", 1) if linked else (platform, raw_uid)
         user_identity = UserIdentity(
             canonical_id=canonical_id,
             platform=profile_platform,
@@ -170,7 +174,8 @@ class IdentityService:
             first_seen=message.timestamp,
             last_seen=message.timestamp,
             interaction_count=0,
-            is_welcomed_in_stream=False
+            is_welcomed_in_stream=False,
+            metadata={"scope": scope, "platform_identity": base_canonical_id} if scope else {},
         )
 
         if self.memory_service:

@@ -1,4 +1,4 @@
-import asyncio
+from services.discord_ui import defer_response, send_response
 import logging
 import random
 from typing import Optional
@@ -6,6 +6,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from services.access import operator_only, operator_callback
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +26,11 @@ class Shayari(commands.Cog):
 
     @app_commands.command(name="shayari_send", description="Send a shayari to YouTube chat")
     @app_commands.describe(index="Index of shayari (optional)")
+    @operator_only()
+    @operator_callback
     async def shayari_send(self, interaction: discord.Interaction, index: Optional[int] = None):
         try:
-            await interaction.response.defer(thinking=True)
+            await defer_response(interaction, thinking=True)
         except Exception as e:
             logger.exception(f"Failed to defer: {e}")
             return
@@ -47,27 +50,27 @@ class Shayari(commands.Cog):
             try:
                 sent = await cm.send_chat_message(sh)
                 if sent:
-                    await interaction.followup.send("✅ Shayari sent to YouTube chat.", ephemeral=True)
+                    await send_response(interaction, "✅ Shayari sent to YouTube chat.", ephemeral=True)
                     return
             except Exception as e:
                 logger.exception(f"Failed to send to YouTube: {e}")
 
         # Fallback to Discord
         try:
-            await interaction.followup.send(f"📜 Shayari: {sh}")
+            await send_response(interaction, f"📜 Shayari: {sh}")
         except Exception as e:
             logger.exception(f"Failed to send to Discord: {e}")
 
     @app_commands.command(name="shayari_list", description="List available shayaris")
     async def shayari_list(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
         desc = "\n".join([f"{i}. {s}" for i, s in enumerate(DEFAULT_SHAYARIS)])
         embed = discord.Embed(title="Shayari List", description=desc, color=discord.Color.blurple())
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

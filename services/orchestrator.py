@@ -49,7 +49,13 @@ class RukiyaOrchestrator:
         self.ai_service = ai_service or AIService(self.config)
         self.ai_engine = ai_engine
 
-    async def process_message(
+    async def process_message(self, message: ChatMessage, bypass_trigger=False, bypass_cooldown=False):
+        from services.scopes import conversation_scope
+        scope = conversation_scope(message, self.memory_service.active_session_id)
+        with self.memory_service.session_scope(scope):
+            return await self._process_message(message, bypass_trigger, bypass_cooldown)
+
+    async def _process_message(
         self,
         message: ChatMessage,
         bypass_trigger: bool = False,
@@ -59,12 +65,12 @@ class RukiyaOrchestrator:
         Full V2 processing pipeline for an incoming ChatMessage.
         """
         logger.info(
-            "event=message_received platform=%s author=%s text='%s'",
-            message.platform, message.author_repr, message.text[:60]
+            "event=message_received platform=%s chars=%d",
+            message.platform, len(message.text)
         )
 
         # 1. Identity Resolution
-        user = self.identity_service.resolve(message)
+        user = await self.memory_service.run_async(self.identity_service.resolve, message)
 
         # 2. Input Safety Check (Prompt injection defense)
         safety_input = self.safety_service.validate_input(message)
@@ -75,9 +81,11 @@ class RukiyaOrchestrator:
             return None
 
         # 3. Retrieve Memory Context
-        session_context = self.memory_service.get_stream_context(user)
-        persistent_memory = self.memory_service.get_relevant_user_memory(user, message.text, limit=5)
-        recent_messages = self.memory_service.get_recent_messages(limit=8)
+        def read_context():
+            return (self.memory_service.get_stream_context(user),
+                    self.memory_service.get_relevant_user_memory(user, message.text, limit=5),
+                    self.memory_service.get_recent_messages(limit=8))
+        session_context, persistent_memory, recent_messages = await self.memory_service.run_async(read_context)
 
         # 4. Decision Engine
         decision = self.decision_service.decide(
@@ -94,7 +102,7 @@ class RukiyaOrchestrator:
         )
 
         # Record incoming interaction regardless of response
-        self.memory_service.record_interaction(user, message.text, role="user", timestamp=message.timestamp)
+        await self.memory_service.run_async(self.memory_service.record_interaction, user, message.text, role="user", timestamp=message.timestamp)
 
         if not decision.should_respond:
             return None
@@ -172,7 +180,7 @@ class RukiyaOrchestrator:
                 latency_ms=0.0,
                 is_fallback=True
             )
-            logger.info("event=fallback_used intent=%s text='%s'", decision.intent, fallback_text)
+            logger.info("event=fallback_used intent=%s", decision.intent)
 
         # 8. Output Safety Validation
         is_safe, validated_text = self.safety_service.validate_output(generated.text, intent=decision.intent, language=language)
@@ -180,7 +188,7 @@ class RukiyaOrchestrator:
 
         # 9. Anti-Repetition Check
         if self.decision_service.is_repetitive(generated.text):
-            logger.info("event=repetition_detected rejecting text='%s'", generated.text)
+            logger.info("event=repetition_detected")
             # Use fallback instead of repeating
             generated.text = self.safety_service.get_fallback(decision.intent, language)
             generated.is_fallback = True
@@ -189,21 +197,21 @@ class RukiyaOrchestrator:
         self.decision_service.record_response(user.canonical_id, generated.text)
 
         # 11. Record Assistant Message & Extract Facts
-        self.memory_service.record_interaction(user, generated.text, role="assistant")
+        await self.memory_service.run_async(self.memory_service.record_interaction, user, generated.text, role="assistant")
 
         # Extract persistent and stream facts from user's message. Serious messages are
         # skipped: "I am suicidal" must never become a remembered name or preference.
         if decision.intent not in SERIOUS_INTENT_INSTRUCTIONS:
-            self.memory_service.extract_and_store_facts(user, message.text)
+            await self.memory_service.run_async(self.memory_service.extract_and_store_facts, user, message.text)
 
         # Mark user as welcomed in stream if intent was greeting
         if not user.is_welcomed_in_stream and decision.intent == "greeting":
             user.is_welcomed_in_stream = True
-            self.memory_service.save_user(user)
+            await self.memory_service.run_async(self.memory_service.save_user, user)
 
         logger.info(
-            "event=ai_response user=%s latency_ms=%.1f chars=%d fallback=%s text='%s'",
-            user.canonical_id, generated.latency_ms, len(generated.text), generated.is_fallback, generated.text
+            "event=ai_response user=%s latency_ms=%.1f chars=%d fallback=%s",
+            user.canonical_id, generated.latency_ms, len(generated.text), generated.is_fallback
         )
 
         return generated
@@ -215,7 +223,10 @@ class RukiyaOrchestrator:
         platform: str = "discord",
         user_id: Optional[str] = None,
         bypass_trigger: bool = False,
-        bypass_cooldown: bool = False
+        bypass_cooldown: bool = False,
+        guild_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
+        video_id: Optional[str] = None,
     ) -> Optional[str]:
         """Convenience method for text-based triggers (e.g. slash /ask or Discord listener)."""
         msg = ChatMessage(
@@ -224,7 +235,7 @@ class RukiyaOrchestrator:
             user_id=user_id or author,
             username=author,
             display_name=author,
-            text=text
+            text=text, guild_id=guild_id, channel_id=channel_id, video_id=video_id,
         )
         res = await self.process_message(msg, bypass_trigger=bypass_trigger, bypass_cooldown=bypass_cooldown)
         return res.text if res else None

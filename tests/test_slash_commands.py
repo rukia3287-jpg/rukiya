@@ -12,7 +12,11 @@ class FakeInteraction:
         self.response = MagicMock()
         self.response.defer = AsyncMock()
         self.response.send_message = AsyncMock()
-        self.response.is_done = MagicMock(return_value=True)
+        self.response.is_done = MagicMock(return_value=False)
+        async def deferred(**kwargs):
+            self.response.is_done.return_value = True
+        self.response.defer.side_effect = deferred
+        self.original_response = AsyncMock()
 
         self.followup = MagicMock()
         self.followup.send = AsyncMock()
@@ -22,6 +26,7 @@ class FakeInteraction:
         self.guild = MagicMock() if in_guild else None
 
         self.user = MagicMock()
+        self.user.id = 7 if is_admin else 8
         self.user.display_name = user_name
         self.user.guild_permissions.administrator = is_admin
 
@@ -30,6 +35,8 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = MagicMock()
         self.bot.latency = 0.042
+        self.bot.config.operator_ids = {"7"}
+        self.bot.is_owner = AsyncMock(return_value=False)
 
         self.chat_cog = RukiyaCog(self.bot)
         self.utility_cog = Utility(self.bot)
@@ -43,7 +50,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
 
         await self.chat_cog.slash_ask.callback(self.chat_cog, interaction, question="What should I do?")
 
-        interaction.response.defer.assert_called_once_with(thinking=True)
+        interaction.response.defer.assert_called_once_with(ephemeral=True, thinking=True)
         interaction.followup.send.assert_called_once()
         sent_embed = interaction.followup.send.call_args[1].get("embed")
         self.assertIsNotNone(sent_embed)
@@ -81,7 +88,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         await self.chat_cog.slash_ask.callback(self.chat_cog, interaction, question="Post this", post_to_yt=True)
 
         interaction.response.send_message.assert_awaited_once()
-        self.assertIn("Only server administrators", interaction.response.send_message.call_args[0][0])
+        self.assertIn("Only the bot owner", interaction.response.send_message.call_args[0][0])
         self.assertTrue(interaction.response.send_message.call_args[1].get("ephemeral"))
         ai_mock.generate_response.assert_not_called()
         cm_mock.send_chat_message.assert_not_called()
@@ -112,7 +119,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interaction.followup.send.call_args[1].get("ephemeral"))
         self.assertNotIn("database exploded", interaction.followup.send.call_args[0][0])
 
-    async def test_welcome_send_requires_administrator(self):
+    async def test_welcome_send_requires_operator(self):
         from cogs.welcome import Welcome
         cog = Welcome(self.bot)
         cm_mock = MagicMock()
@@ -146,10 +153,10 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", is_admin=False))
 
     async def test_slash_ask_yt_posting_refused_in_direct_messages(self):
-        await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", in_guild=False, is_admin=True))
+        await self._assert_yt_posting_refused(FakeInteraction(user_name="Viewer", in_guild=False, is_admin=False))
 
     async def test_slash_say_when_yt_not_running(self):
-        interaction = FakeInteraction()
+        interaction = FakeInteraction(is_admin=True)
         self.bot.chat_monitor = None
 
         await self.chat_cog.slash_say.callback(self.chat_cog, interaction, text="Hello YouTube")
@@ -157,7 +164,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not currently running", interaction.followup.send.call_args[0][0])
 
     async def test_slash_say_when_yt_running(self):
-        interaction = FakeInteraction()
+        interaction = FakeInteraction(is_admin=True)
         cm_mock = MagicMock()
         cm_mock.is_running = True
         cm_mock.send_chat_message = AsyncMock(return_value=True)
@@ -168,7 +175,7 @@ class SlashCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sent to YouTube live chat", interaction.followup.send.call_args[0][0])
 
     async def test_slash_auto_reply_actions(self):
-        interaction = FakeInteraction()
+        interaction = FakeInteraction(is_admin=True)
 
         # Disable
         await self.chat_cog.slash_auto_reply.callback(self.chat_cog, interaction, action="disable")

@@ -1,3 +1,4 @@
+from services.discord_ui import defer_response, send_response
 import os
 import re
 import time
@@ -9,6 +10,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from services.access import is_operator, operator_only, operator_callback, prefix_operator
 from services.ai_service import RUKIYA_SYSTEM_PROMPT as SAFE_RUKIYA_SYSTEM_PROMPT, validate_rukiya_response
 from services.language import detect_reply_language
 from services.safety_service import DEFAULT_VALIDATOR_FALLBACK, localize_fallback
@@ -137,6 +139,8 @@ class RukiyaCog(commands.Cog):
                         cleaned_text,
                         author=message.author.display_name,
                         platform="discord",
+                        guild_id=str(message.guild.id) if getattr(message, "guild", None) else None,
+                        channel_id=str(message.channel.id) if getattr(message.channel, "id", None) else None,
                         user_id=str(message.author.id),
                         bypass_trigger=True,
                         bypass_cooldown=True
@@ -156,7 +160,7 @@ class RukiyaCog(commands.Cog):
 
                 if reply:
                     self._remember_discord_reply(user_id)
-                    await message.reply(reply, mention_author=False)
+                    await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except Exception as e:
             logger.exception(f"Failed to reply to Discord message: {e}")
 
@@ -213,6 +217,8 @@ class RukiyaCog(commands.Cog):
                     username=author,
                     display_name=author,
                     text=message,
+                    video_id=getattr(self.bot.chat_monitor, "video_id", None),
+                    channel_id=getattr(self.bot.chat_monitor, "live_chat_id", None),
                     is_owner=bool(details.get("isChatOwner")),
                     is_moderator=bool(details.get("isChatModerator")),
                 )
@@ -235,7 +241,7 @@ class RukiyaCog(commands.Cog):
             sent = await cm.send_chat_message(reply)
             if sent:
                 self._last_sent_at = asyncio.get_event_loop().time()
-                logger.info("Rukiya replied to %s: %s", author, reply)
+                logger.info("YouTube reply delivered chars=%d", len(reply))
 
         except Exception:
             logger.exception(
@@ -314,7 +320,7 @@ class RukiyaCog(commands.Cog):
     # Prefix commands  (!rukiya enable / disable / ask / say)
     # ────────────────────────────────────────────
     @commands.group(name="rukiya", invoke_without_command=True)
-    @commands.is_owner()
+    @prefix_operator()
     async def rukiya_group(self, ctx: commands.Context):
         """Control Rukiya YouTube responder. Subcommands: enable, disable, ask, say"""
         embed = discord.Embed(
@@ -331,19 +337,19 @@ class RukiyaCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @rukiya_group.command(name="enable")
-    @commands.is_owner()
+    @prefix_operator()
     async def cmd_enable(self, ctx: commands.Context):
         self.enabled = True
         await ctx.send("⚡ Rukiya auto-responder **enabled**. She'll reply to YouTube chat when triggered.")
 
     @rukiya_group.command(name="disable")
-    @commands.is_owner()
+    @prefix_operator()
     async def cmd_disable(self, ctx: commands.Context):
         self.enabled = False
         await ctx.send("🛑 Rukiya auto-responder **disabled**.")
 
     @rukiya_group.command(name="status")
-    @commands.is_owner()
+    @prefix_operator()
     async def cmd_status(self, ctx: commands.Context):
         cm = getattr(self.bot, "chat_monitor", None)
         yt_running = cm.is_running if cm else False
@@ -355,14 +361,25 @@ class RukiyaCog(commands.Cog):
         await ctx.send(embed=embed)
 
     @rukiya_group.command(name="ask")
-    @commands.is_owner()
+    @prefix_operator()
     async def cmd_ask(self, ctx: commands.Context, *, question: str):
         """Ask Rukiya something and post her reply to YouTube chat."""
         async with ctx.typing():
             try:
-                reply = await self.generate_reply(question, author=ctx.author.display_name)
+                orch = getattr(self.bot, "orchestrator", None)
+                from services.orchestrator import RukiyaOrchestrator
+                if isinstance(orch, RukiyaOrchestrator):
+                    reply = await orch.process_raw_text(
+                        text=question, author=ctx.author.display_name,
+                        user_id=str(ctx.author.id), platform="discord",
+                        guild_id=str(ctx.guild.id) if ctx.guild else None,
+                        channel_id=str(ctx.channel.id), bypass_trigger=True,
+                    )
+                else:
+                    reply = await self.generate_reply(question, author=ctx.author.display_name)
             except Exception as e:
-                await ctx.send(f"❌ Failed to get reply: {e}")
+                logger.exception("Prefix ask failed")
+                await ctx.send("❌ Could not generate a reply. Check the operator logs.")
                 return
 
         if not reply:
@@ -389,7 +406,7 @@ class RukiyaCog(commands.Cog):
             await ctx.send("❌ Failed to post to YouTube chat.")
 
     @rukiya_group.command(name="say")
-    @commands.is_owner()
+    @prefix_operator()
     async def cmd_say(self, ctx: commands.Context, *, text: str):
         """Send a raw message to YouTube chat as Rukiya."""
         cm = getattr(self.bot, "chat_monitor", None)
@@ -413,12 +430,9 @@ class RukiyaCog(commands.Cog):
     )
     async def slash_ask(self, interaction: discord.Interaction, question: str, post_to_yt: bool = False):
         """Ask Rukiya a question directly via slash command."""
-        if post_to_yt and (
-            not interaction.guild
-            or not interaction.user.guild_permissions.administrator
-        ):
+        if post_to_yt and not await is_operator(self.bot, interaction.user):
             await interaction.response.send_message(
-                "❌ Only server administrators can post an AI reply to YouTube chat.",
+                "❌ Only the bot owner or configured operators can post an AI reply to YouTube chat.",
                 ephemeral=True,
             )
             return
@@ -431,7 +445,7 @@ class RukiyaCog(commands.Cog):
             return
 
         try:
-            await interaction.response.defer(thinking=True)
+            await defer_response(interaction, thinking=True)
         except Exception:
             pass
 
@@ -445,6 +459,8 @@ class RukiyaCog(commands.Cog):
                     question,
                     author=interaction.user.display_name,
                     platform="discord",
+                    guild_id=str(interaction.guild.id) if interaction.guild else None,
+                    channel_id=str(interaction.channel_id),
                     user_id=str(interaction.user.id),
                     bypass_trigger=True,
                     bypass_cooldown=True
@@ -461,14 +477,14 @@ class RukiyaCog(commands.Cog):
                 reply = await self.generate_reply(question, author=interaction.user.display_name)
         except Exception:
             logger.exception("/ask pipeline failed")
-            await interaction.followup.send(
+            await send_response(interaction,
                 "❌ Something went wrong while Rukiya was answering. Please try again later.",
                 ephemeral=True,
             )
             return
 
         if not reply:
-            await interaction.followup.send(
+            await send_response(interaction,
                 "❌ Rukiya didn't answer that one (blocked by safety rules, rate-limited, or the model is unavailable).",
                 ephemeral=True,
             )
@@ -490,28 +506,29 @@ class RukiyaCog(commands.Cog):
                 yt_status_msg = "\n\n*(⚠️ YouTube live chat is not active)*"
             embed.description += yt_status_msg
 
-        await interaction.followup.send(embed=embed)
+        await send_response(interaction, embed=embed)
 
     @app_commands.command(name="say", description="Send a message to YouTube live chat as Rukiya")
     @app_commands.describe(text="Message text to post in YouTube live chat")
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def slash_say(self, interaction: discord.Interaction, text: str):
         """Send a message directly to YouTube live chat."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
         cm = getattr(self.bot, "chat_monitor", None)
         if not cm or not cm.is_running:
-            await interaction.followup.send("❌ YouTube live chat is not currently running. Start monitoring with `/start <video_id>` first.", ephemeral=True)
+            await send_response(interaction, "❌ YouTube live chat is not currently running. Start monitoring with `/start <video_id>` first.", ephemeral=True)
             return
 
         ok = await cm.send_chat_message(text)
         if ok:
-            await interaction.followup.send(f"✅ Sent to YouTube live chat: `{text[:100]}`", ephemeral=True)
+            await send_response(interaction, f"✅ Sent to YouTube live chat: `{text[:100]}`", ephemeral=True)
         else:
-            await interaction.followup.send("❌ Failed to send message to YouTube live chat.", ephemeral=True)
+            await send_response(interaction, "❌ Failed to send message to YouTube live chat.", ephemeral=True)
 
     @app_commands.command(name="auto_reply", description="Check or toggle YouTube chat auto-replying")
     @app_commands.describe(action="Action to perform: status, enable, or disable")
@@ -520,29 +537,30 @@ class RukiyaCog(commands.Cog):
         app_commands.Choice(name="Enable (Auto-respond to triggers)", value="enable"),
         app_commands.Choice(name="Disable (Stop auto-responding)", value="disable"),
     ])
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def slash_auto_reply(self, interaction: discord.Interaction, action: str = "status"):
         """Manage auto-reply setting for YouTube live chat."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
         if action == "enable":
             self.enabled = True
-            await interaction.followup.send("⚡ Rukiya auto-reply **enabled** for YouTube chat.", ephemeral=True)
+            await send_response(interaction, "⚡ Rukiya auto-reply **enabled** for YouTube chat.", ephemeral=True)
         elif action == "disable":
             self.enabled = False
-            await interaction.followup.send("🛑 Rukiya auto-reply **disabled** for YouTube chat.", ephemeral=True)
+            await send_response(interaction, "🛑 Rukiya auto-reply **disabled** for YouTube chat.", ephemeral=True)
         else:
             status_text = "✅ **Enabled**" if self.enabled else "❌ **Disabled**"
-            await interaction.followup.send(f"🗡️ YouTube chat auto-reply is currently: {status_text}", ephemeral=True)
+            await send_response(interaction, f"🗡️ YouTube chat auto-reply is currently: {status_text}", ephemeral=True)
 
     @app_commands.command(name="rukiya_info", description="View Rukiya's character profile and system details")
     async def slash_rukiya_info(self, interaction: discord.Interaction):
         """Display information about Rukiya's character and active configuration."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
@@ -560,7 +578,7 @@ class RukiyaCog(commands.Cog):
         embed.add_field(name="Discord Cooldown", value=f"{self.discord_cooldown_seconds}s", inline=True)
         embed.add_field(name="Chat Cooldown", value=f"{self.cooldown_seconds}s", inline=True)
         embed.set_footer(text="Call my name or tag me anytime in chat! ❄️")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

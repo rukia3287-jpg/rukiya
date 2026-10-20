@@ -9,6 +9,11 @@ Gracefully degrades to in-memory dictionary storage if SQLite encounters any ope
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
+import threading
 import json
 import logging
 import math
@@ -24,6 +29,14 @@ from services.models import MemoryEntry, StreamSession, UserIdentity
 logger = logging.getLogger(__name__)
 
 
+def serialized_memory(function):
+    @wraps(function)
+    def wrapped(self, *args, **kwargs):
+        with self._state_lock:
+            return function(self, *args, **kwargs)
+    return wrapped
+
+
 class MemoryService:
     """Manages stream and persistent user memories with SQLite and resilient fallback."""
 
@@ -34,6 +47,9 @@ class MemoryService:
     DB_RETRY_SECONDS = 30.0
 
     def __init__(self, config: Optional[Config] = None, clock=None):
+        self._state_lock = threading.RLock()
+        self._async_lock = asyncio.Lock()
+        self._request_session = ContextVar(f'memory_session_{id(self)}', default=None)
         self.config = config or Config()
         self.db_path = getattr(self.config, "db_path", "rukiya_memory.db")
         self.decay_constant = float(getattr(self.config, "memory_decay_days", 30.0))
@@ -61,6 +77,37 @@ class MemoryService:
 
         self.active_session_id: Optional[str] = None
         self._init_db()
+
+    def _session_id(self, explicit=None):
+        return explicit or self._request_session.get() or self.active_session_id or "default_session"
+
+    @contextmanager
+    def session_scope(self, session_id):
+        token = self._request_session.set(session_id)
+        try:
+            yield
+        finally:
+            self._request_session.reset(token)
+
+    async def run_async(self, function, *args, **kwargs):
+        """Serialize worker access, retaining ownership until cancelled writes finish."""
+        async with self._async_lock:
+            def call():
+                with self._state_lock:
+                    return function(*args, **kwargs)
+            task = asyncio.create_task(asyncio.to_thread(call))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Multiple cancellation requests must not release ownership while a
+                # SQLite worker is still committing a write.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                task.result()
+                raise
 
     @property
     def fallback_mode(self) -> bool:
@@ -92,6 +139,7 @@ class MemoryService:
         logger.warning("MemoryService recovered SQLite persistence and wrote back in-memory state")
         return True
 
+    @serialized_memory
     def persistence_available(self) -> bool:
         """True if SQLite is in use. While in fallback this also attempts a (rate-limited) recovery."""
         if self._fallback_mode:
@@ -317,6 +365,7 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # Stream Session Management
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def start_stream_session(self, video_id: str, session_id: Optional[str] = None) -> StreamSession:
         sid = session_id or f"stream_{video_id}_{int(time.time())}"
         session = StreamSession(
@@ -349,6 +398,7 @@ class MemoryService:
         logger.info("Started stream session %s for video %s", sid, video_id)
         return session
 
+    @serialized_memory
     def end_stream_session(self, session_id: Optional[str] = None) -> None:
         sid = session_id or self.active_session_id
         if not sid:
@@ -383,6 +433,7 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # User Profile Operations
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def get_user(self, canonical_id: str) -> Optional[UserIdentity]:
         conn = self._get_connection()
         if not conn:
@@ -433,6 +484,7 @@ class MemoryService:
             user.interaction_count, json.dumps(meta)
         ))
 
+    @serialized_memory
     def save_user(self, user: UserIdentity) -> None:
         self._in_memory_users[user.canonical_id] = user
         conn = self._get_connection()
@@ -452,6 +504,7 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # Identity Link Operations
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def load_identity_links(self) -> Dict[str, str]:
         """Return every stored link as {secondary canonical_id: primary canonical_id}."""
         conn = self._get_connection()
@@ -466,6 +519,7 @@ class MemoryService:
         finally:
             conn.close()
 
+    @serialized_memory
     def save_identity_link(self, secondary_id: str, primary_id: str) -> bool:
         """Store a link. Returns True only if it was written to SQLite.
 
@@ -502,6 +556,7 @@ class MemoryService:
         finally:
             conn.close()
 
+    @serialized_memory
     def delete_identity_link(self, secondary_id: str) -> bool:
         """Remove a link. Returns True only if the removal was written to SQLite."""
         self._in_memory_identity_links.pop(secondary_id, None)
@@ -522,6 +577,7 @@ class MemoryService:
         finally:
             conn.close()
 
+    @serialized_memory
     def record_interaction(
         self,
         user: UserIdentity,
@@ -541,7 +597,7 @@ class MemoryService:
             user.interaction_count += 1
         self.save_user(user)
 
-        sid = session_id or self.active_session_id or "default_session"
+        sid = self._session_id(session_id)
 
         # Record recent message
         msg_record = {
@@ -578,6 +634,7 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # Persistent Memory Operations
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def get_effective_confidence(self, entry: MemoryEntry) -> float:
         """Calculate confidence decayed by age in days."""
         age_days = (time.time() - entry.updated_at) / 86400.0
@@ -585,6 +642,7 @@ class MemoryService:
             return entry.confidence
         return entry.confidence * math.exp(-age_days / self.decay_constant)
 
+    @serialized_memory
     def set_user_memory(self, canonical_id: str, key: str, value: str, confidence: float = 0.9, source: str = "explicit_statement") -> MemoryEntry:
         now = time.time()
         user_memories = self._in_memory_memories.setdefault(canonical_id, {})
@@ -655,6 +713,7 @@ class MemoryService:
 
         return entry
 
+    @serialized_memory
     def get_all_user_memories(self, canonical_id: str) -> List[MemoryEntry]:
         memories: List[MemoryEntry] = []
         conn = self._get_connection()
@@ -683,6 +742,7 @@ class MemoryService:
         finally:
             conn.close()
 
+    @serialized_memory
     def get_relevant_user_memory(self, user: UserIdentity, query_text: str, limit: int = 5) -> List[MemoryEntry]:
         """Score memories by semantic keyword match, confidence, recency, usage, and identity relevance."""
         all_memories = self.get_all_user_memories(user.canonical_id)
@@ -738,6 +798,7 @@ class MemoryService:
 
         return top_entries
 
+    @serialized_memory
     def delete_user_memories(self, canonical_id: str) -> bool:
         """Reset all persistent memory for a user.
 
@@ -762,9 +823,10 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # Stream Memory (Temporary)
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def set_stream_fact(self, canonical_id: str, key: str, value: str, confidence: float = 0.85, ttl_hours: float = 24.0, session_id: Optional[str] = None) -> MemoryEntry:
         now = time.time()
-        sid = session_id or self.active_session_id or "default_session"
+        sid = self._session_id(session_id)
         mem_key = f"{sid}:{canonical_id}"
         session_mems = self._in_memory_stream_memory.setdefault(mem_key, {})
 
@@ -808,9 +870,10 @@ class MemoryService:
 
         return entry
 
+    @serialized_memory
     def get_stream_context(self, user: UserIdentity, session_id: Optional[str] = None) -> List[MemoryEntry]:
         """Fetch active unexpired temporary stream facts for this user."""
-        sid = session_id or self.active_session_id or "default_session"
+        sid = self._session_id(session_id)
         now = time.time()
         mem_key = f"{sid}:{user.canonical_id}"
 
@@ -845,9 +908,10 @@ class MemoryService:
         finally:
             conn.close()
 
+    @serialized_memory
     def get_recent_messages(self, session_id: Optional[str] = None, limit: int = 8) -> List[Dict[str, Any]]:
         """Retrieve recent conversation history for prompt context."""
-        sid = session_id or self.active_session_id or "default_session"
+        sid = self._session_id(session_id)
         in_mem = self._in_memory_recent_messages.get(sid, [])
         if in_mem:
             return in_mem[-limit:]
@@ -870,6 +934,7 @@ class MemoryService:
     # ─────────────────────────────────────────────────────────────
     # Fact Extraction & Scoring Algorithm
     # ─────────────────────────────────────────────────────────────
+    @serialized_memory
     def evaluate_memory_score(self, explicitness: float, repetition: float, future_usefulness: float, identity_relevance: float, stability: float) -> float:
         """
         memory_score = explicitness * 0.30 + repetition * 0.20 + future_usefulness * 0.25 + identity_relevance * 0.15 + stability * 0.10
@@ -883,6 +948,7 @@ class MemoryService:
         )
         return min(1.0, max(0.0, score))
 
+    @serialized_memory
     def extract_and_store_facts(self, user: UserIdentity, text: str) -> List[MemoryEntry]:
         """
         Heuristic extraction of high-value persistent and stream facts.

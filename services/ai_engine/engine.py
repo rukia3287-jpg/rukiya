@@ -555,7 +555,9 @@ class AIEngine:
                     evidence_items=evidence_items,
                     compiler=self.compiler,
                     critic=self.critic,
-                    generate_fn=_repair_gen
+                    generate_fn=_repair_gen,
+                    verified_current_information=verified_current_information,
+                    search_failed=(search_attempted and not search_succeeded),
                 )
                 candidate_text = repaired_text
                 repair_count = rep_count
