@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, ANY
 from cogs.chat_bot import RukiyaCog
 from services.config import Config
 from services.memory_service import MemoryService
@@ -75,7 +75,8 @@ class DiscordTriggerTests(unittest.IsolatedAsyncioTestCase):
         self.bot.ai_service = ai_mock
 
         await self.cog.on_message(msg)
-        msg.reply.assert_called_once_with("Oi. What do you want?", mention_author=False)
+        msg.reply.assert_called_once_with("Oi. What do you want?", mention_author=False, allowed_mentions=ANY)
+        self.assertEqual(msg.reply.call_args.kwargs["allowed_mentions"].to_dict(), {"parse": []})
 
 
 
@@ -113,7 +114,8 @@ class DiscordTriggerTests(unittest.IsolatedAsyncioTestCase):
         self.bot.ai_service = ai_mock
 
         await self.cog.on_message(msg)
-        msg.reply.assert_called_once_with("Yamamoto-sōtaichō, obviously.", mention_author=False)
+        msg.reply.assert_called_once_with("Yamamoto-sōtaichō, obviously.", mention_author=False, allowed_mentions=ANY)
+        self.assertEqual(msg.reply.call_args.kwargs["allowed_mentions"].to_dict(), {"parse": []})
 
     async def test_orchestrator_refusal_is_respected_not_bypassed(self):
         user = FakeUser(id=222, name="Alice", bot=False)

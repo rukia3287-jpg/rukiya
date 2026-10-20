@@ -154,6 +154,19 @@ class Critic:
                     repair_instruction="Do not state a fabricated price or unverified current fact. Transparently state in character that you cannot verify the live price right now."
                 )
 
+            live_claim = re.search(
+                r"\b(?:currently|today|right now|latest|current)\b.*\b(?:is|are|was|won|wins|has|score|ceo|president|released)\b|"
+                r"\b(?:is|are|won|wins|has|score|ceo|president|released)\b.*\b(?:currently|today|right now|latest)\b",
+                text_lower,
+            )
+            uncertainty = re.search(r"\b(?:can't|cannot|couldn't|unable to|not able to)\s+(?:verify|confirm|check|access)\b", text_lower)
+            if live_claim and not uncertainty:
+                return CriticReport(
+                    verdict=CriticVerdict.REPAIR, score=0.4,
+                    reasons=["Unverified current factual claim"],
+                    repair_instruction="Do not invent live facts. State briefly that you cannot verify the current information.",
+                )
+
         return CriticReport(
             verdict=CriticVerdict.PASS,
             score=1.0,

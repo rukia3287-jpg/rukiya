@@ -1,4 +1,6 @@
+from services.discord_ui import defer_response, send_response, OwnedView
 import time
+import math
 import logging
 
 import discord
@@ -17,22 +19,23 @@ class Utility(commands.Cog):
     @app_commands.command(name="ping", description="Check bot latency")
     async def ping(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
-        latency_ms = round(self.bot.latency * 1000) if hasattr(self.bot, "latency") else 0
+        latency = getattr(self.bot, "latency", float("nan"))
+        latency_ms = f"{round(latency * 1000)} ms" if math.isfinite(latency) else "Connecting…"
         embed = discord.Embed(
-            title="🏓 Pong!", 
-            description=f"Latency: {latency_ms} ms", 
+            title="🏓 Pong!",
+            description=f"Latency: {latency_ms}",
             color=discord.Color.green()
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(name="uptime", description="Show bot uptime")
     async def uptime(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
@@ -40,19 +43,19 @@ class Utility(commands.Cog):
         hours = int(uptime_s // 3600)
         minutes = int((uptime_s % 3600) // 60)
         seconds = int(uptime_s % 60)
-        
+
         embed = discord.Embed(
             title="⏱️ Bot Uptime",
             description=f"{hours}h {minutes}m {seconds}s",
             color=discord.Color.blue()
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(name="help", description="Show all available commands and features")
     async def help_command(self, interaction: discord.Interaction):
         """Display an overview of all available slash and chat commands."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
@@ -104,14 +107,38 @@ class Utility(commands.Cog):
                 "`/ping` — Check bot latency\n"
                 "`/uptime` — View how long the bot has been running\n"
                 "`/bot_status` — Full system & service diagnostic dashboard\n"
-                "`/test_ai <msg>` — Direct raw test of OpenRouter API\n"
+                "`/test_ai <message>` — Test the configured AI pipeline\n"
                 "`/test_trigger <msg>` — Dry-run trigger check on a message"
             ),
             inline=False
         )
 
-        embed.set_footer(text="Bleach Soul Reaper • Kuchiki Rukiya")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.add_field(name="🧠 Memory controls", value="`/memory_lookup` — Inspect current-context facts\n`/memory_reset` — Preview and confirm a fact reset\n`/rate_limit_status` — Inspect request budgets", inline=False)
+        embed.set_footer(text="YouTube posting, diagnostics and memory controls require the bot owner or OPERATOR_IDS. Chat, help and utilities are public.")
+        view = HelpView(interaction.user.id, embed)
+        await send_response(interaction, embed=embed, view=view, ephemeral=True)
+        await view.bind(interaction)
+
+
+class HelpView(OwnedView):
+    def __init__(self, owner_id, overview):
+        super().__init__(owner_id)
+        self.overview = overview
+        self.menu.options = [discord.SelectOption(label="All commands", value="all")]+[
+            discord.SelectOption(label=field.name, value=str(i)) for i, field in enumerate(overview.fields)
+        ]
+
+    @discord.ui.select(placeholder="Choose a command category", options=[discord.SelectOption(label="All commands", value="all")])
+    async def menu(self, interaction, select):
+        if not await self.interaction_check(interaction):
+            return
+        selected = select.values[0]
+        embed = self.overview.copy()
+        if selected != "all":
+            field = self.overview.fields[int(selected)]
+            embed.clear_fields()
+            embed.add_field(name=field.name, value=field.value, inline=False)
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 async def setup(bot: commands.Bot):

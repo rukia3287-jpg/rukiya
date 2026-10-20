@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict
 
 from services.memory_service import MemoryService
+from services.chat_monitor import ChatMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,10 @@ def build_health_payload(bot: Any) -> Dict[str, Any]:
     monitor = getattr(bot, "chat_monitor", None)
     youtube_monitoring = bool(getattr(monitor, "is_running", False))
 
+    sync_error = getattr(bot, "command_sync_error", None)
     return {
-        "status": "degraded" if (failed_cogs or memory_fallback) else "ok",
+        "status": "degraded" if (failed_cogs or memory_fallback or sync_error) else "ok",
+        "command_sync_error": sync_error,
         "discord_ready": discord_ready,
         "failed_cogs": failed_cogs,
         "memory_fallback_mode": memory_fallback,
@@ -45,7 +48,10 @@ async def shutdown_services(bot: Any, task_timeout: float = 5.0) -> None:
         task = getattr(monitor, "_monitor_task", None)
         try:
             if getattr(monitor, "is_running", False) or (task is not None and not task.done()):
-                monitor.stop_monitoring()
+                if isinstance(monitor, ChatMonitor):
+                    await monitor.stop_async()
+                else:
+                    monitor.stop_monitoring()
             if task is not None and not task.done():
                 await asyncio.wait({task}, timeout=task_timeout)
         except Exception as e:

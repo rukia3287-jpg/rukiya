@@ -1,5 +1,5 @@
+from services.discord_ui import defer_response, send_response
 # cogs/welcome.py
-import asyncio
 import logging
 import re
 from typing import Optional
@@ -7,6 +7,7 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
+from services.access import is_operator, operator_only, operator_callback
 
 from services.safety_service import validate_rukiya_response
 
@@ -39,7 +40,7 @@ class Welcome(commands.Cog):
                 pass
 
             cm = getattr(self.bot, "chat_monitor", None)
-            if cm and cm.is_running:
+            if cm and cm.is_running and str(guild.id) in getattr(self.bot.config, "welcome_youtube_guild_ids", set()):
                 # Display names are untrusted input: keep only plain name characters.
                 safe_name = re.sub(r"[^\w .\-]", "", member.display_name)[:32].strip() or "friend"
                 welcome_msg = f"Welcome {safe_name}! 🎉"
@@ -67,17 +68,19 @@ class Welcome(commands.Cog):
 
     @app_commands.command(name="welcome_send", description="Send a manual welcome message to YouTube chat (or Discord fallback)")
     @app_commands.describe(text="Text to send (if empty, AI or default will be used)")
+    @operator_only()
+    @operator_callback
     async def welcome_send(self, interaction: discord.Interaction, text: Optional[str] = None):
-        if not interaction.guild or not interaction.user.guild_permissions.administrator:
+        if not await is_operator(self.bot, interaction.user):
             await interaction.response.send_message(
-                "❌ Only server administrators can send welcome messages.",
+                "❌ Only the bot owner or configured operators can send welcome messages.",
                 ephemeral=True,
             )
             return
 
         try:
             if not interaction.response.is_done():
-                await interaction.response.defer(thinking=True)
+                await defer_response(interaction, thinking=True)
         except Exception:
             pass
 
@@ -99,13 +102,13 @@ class Welcome(commands.Cog):
             try:
                 ok = await cm.send_chat_message(text, message_kind="welcome")
                 if ok:
-                    await interaction.followup.send("✅ Welcome sent to YouTube chat.", ephemeral=True)
+                    await send_response(interaction, "✅ Welcome sent to YouTube chat.", ephemeral=True)
                     return
             except Exception:
                 logger.exception("Failed to send welcome to YouTube")
 
         try:
-            await interaction.followup.send(f"📣 Welcome: {text}", allowed_mentions=discord.AllowedMentions.none())
+            await send_response(interaction, f"📣 Welcome: {text}", allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             logger.exception("Failed to send welcome fallback message")
 

@@ -1,16 +1,17 @@
+from services.discord_ui import defer_response, send_response, ConfirmView, StatusView, recent_errors
 """cogs/admin_commands.py
 Admin diagnostics and control commands for Rukiya V2.
 
-All admin commands are permission-protected (Administrator / Owner).
+Global controls require the bot owner or an explicit configured operator.
 Strict secret masking ensures API keys, tokens, and secrets are NEVER exposed in Discord.
 """
-import asyncio
 import logging
 from typing import Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from services.access import operator_only, operator_callback
 
 from services.models import ChatMessage
 
@@ -42,12 +43,12 @@ class AdminCommands(commands.Cog):
     # ────────────────────────────────────────────
     @app_commands.command(name="test_ai", description="Test Rukiya's AI response directly (bypasses trigger rules)")
     @app_commands.describe(message="Message to test AI generation with")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def test_ai(self, interaction: discord.Interaction, message: str):
         """Directly calls AI service or orchestrator with Rukiya persona."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception as e:
             logger.exception("Failed to defer /test_ai: %s", e)
             return
@@ -56,7 +57,7 @@ class AdminCommands(commands.Cog):
         orch = getattr(self.bot, "orchestrator", None)
 
         if not ai and not orch:
-            await interaction.followup.send(
+            await send_response(interaction,
                 "❌ Neither `ai_service` nor `orchestrator` is initialized on the bot.",
                 ephemeral=True
             )
@@ -68,7 +69,7 @@ class AdminCommands(commands.Cog):
         has_v2_engine = bool(getattr(orch, "ai_engine", None))
 
         if not openrouter_key and not has_v2_engine:
-            await interaction.followup.send(
+            await send_response(interaction,
                 "❌ No usable AI provider is configured. Set `OPENROUTER_API_KEY` and/or `GEMINI_API_KEY`.",
                 ephemeral=True
             )
@@ -83,7 +84,9 @@ class AdminCommands(commands.Cog):
                     platform="discord",
                     user_id=str(interaction.user.id),
                     bypass_trigger=True,
-                    bypass_cooldown=True
+                    bypass_cooldown=True,
+                    guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+                    channel_id=str(interaction.channel_id),
                 )
             elif ai:
                 response = await ai._call_openrouter(
@@ -101,7 +104,7 @@ class AdminCommands(commands.Cog):
                 embed.set_footer(
                     text=f"Model: {getattr(ai, 'model', 'unknown')} | Length: {len(response)} chars | Safe test ✅"
                 )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await send_response(interaction, embed=embed, ephemeral=True)
             else:
                 embed = discord.Embed(
                     title="❌ No Response from AI Service",
@@ -116,11 +119,11 @@ class AdminCommands(commands.Cog):
                     ),
                     inline=False
                 )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await send_response(interaction, embed=embed, ephemeral=True)
 
         except Exception as e:
             logger.exception("test_ai failed")
-            await interaction.followup.send(
+            await send_response(interaction,
                 f"❌ Exception during AI test: `{type(e).__name__}`. Check bot logs for details.",
                 ephemeral=True
             )
@@ -130,12 +133,12 @@ class AdminCommands(commands.Cog):
     # ────────────────────────────────────────────
     @app_commands.command(name="test_trigger", description="Check if a message would trigger Rukiya")
     @app_commands.describe(message="Message to check against trigger and decision rules")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def test_trigger(self, interaction: discord.Interaction, message: str):
         """Dry-run DecisionService to inspect eligibility and priority breakdown."""
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
@@ -179,9 +182,11 @@ class AdminCommands(commands.Cog):
                 user_id=user_id,
                 username=author,
                 display_name=author,
-                text=message
+                text=message,
+                guild_id=str(interaction.guild_id) if interaction.guild_id else None,
+                channel_id=str(interaction.channel_id),
             )
-            user_obj = identity_svc.resolve(chat_msg)
+            user_obj = await orch.memory_service.run_async(identity_svc.resolve, chat_msg)
             dec = decision_svc.decide(chat_msg, user_obj)
             all_pass = dec.should_respond
             decision_info = (
@@ -207,17 +212,17 @@ class AdminCommands(commands.Cog):
             result_lines.append(line)
 
         embed.add_field(name="Check Results", value="\n".join(result_lines) + decision_info, inline=False)
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
     # ────────────────────────────────────────────
     # /bot_status  — diagnostic dashboard
     # ────────────────────────────────────────────
     @app_commands.command(name="bot_status", description="Get full bot and V2 service status")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def status(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception as e:
             logger.exception("Failed to defer: %s", e)
             return
@@ -253,33 +258,44 @@ class AdminCommands(commands.Cog):
             key_status = mask_secret(getattr(ai, "openrouter_key", None))
             embed.add_field(name="API Key", value=key_status, inline=True)
 
-        embed.set_footer(text="Rukiya V2 Architecture • All secrets securely masked")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        if mem:
+            available = await mem.run_async(mem.persistence_available)
+            embed.add_field(name="Memory storage", value="SQLite available" if available else "⚠️ Temporary fallback; writes pending", inline=False)
+        embed.add_field(name="Member welcomes", value="Enabled; also enable Server Members Intent in the Developer Portal" if self.bot.intents.members else "Disabled; set DISCORD_MEMBER_WELCOMES_ENABLED=true and enable the portal intent", inline=False)
+        sync_error = getattr(self.bot, "command_sync_error", None)
+        embed.add_field(name="Slash command sync", value=f"⚠️ {sync_error}" if sync_error else "✅ Last sync succeeded", inline=True)
+        failed = getattr(self.bot, "failed_cogs", [])
+        embed.add_field(name="Failed modules", value=", ".join(failed)[:1000] or "None", inline=False)
+        errors = "\n".join(f"`{e['reference']}` · {e['type']}" for e in list(recent_errors)[-5:])
+        embed.add_field(name="Recent command errors", value=errors or "None since startup", inline=False)
+        embed.set_footer(text="Private operator panel • Credentials are never displayed")
+        view = StatusView(interaction.user.id, lambda event: self.status.callback(self, event))
+        await send_response(interaction, embed=embed, view=view, ephemeral=True)
+        await view.bind(interaction)
 
     # ────────────────────────────────────────────
     # /memory_lookup — inspect user memory
     # ────────────────────────────────────────────
     @app_commands.command(name="memory_lookup", description="Lookup memory stored for a user")
-    @app_commands.describe(user_id="Platform canonical ID or Discord user mention")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def memory_lookup(self, interaction: discord.Interaction, user_id: str):
+    @app_commands.describe(user_id="Discord mention, stable platform ID, or full scoped canonical ID", scope="Current Discord context or legacy unscoped storage")
+    @app_commands.choices(scope=[app_commands.Choice(name="Current Discord context", value="current"), app_commands.Choice(name="Legacy / unscoped", value="legacy")])
+    @operator_only()
+    @operator_callback
+    async def memory_lookup(self, interaction: discord.Interaction, user_id: str, scope: str = "current"):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
         mem_svc = getattr(self.bot, "memory_service", None)
         if not mem_svc:
-            await interaction.followup.send("❌ Memory service not active.", ephemeral=True)
+            await send_response(interaction, "❌ Memory service not active.", ephemeral=True)
             return
 
-        # Clean user_id if mention passed
-        clean_id = user_id.replace("<@", "").replace(">", "").replace("!", "").strip()
-        canonical_id = f"discord:{clean_id}" if ":" not in clean_id else clean_id
-
-        memories = mem_svc.get_all_user_memories(canonical_id)
-        user_obj = mem_svc.get_user(canonical_id)
+        canonical_id = self.memory_target(interaction, user_id, scope)
+        def read_memory():
+            return mem_svc.get_all_user_memories(canonical_id), mem_svc.get_user(canonical_id)
+        memories, user_obj = await mem_svc.run_async(read_memory)
 
         embed = discord.Embed(title=f"🧠 Memory Lookup: `{canonical_id}`", color=discord.Color.blue())
         if user_obj:
@@ -288,57 +304,71 @@ class AdminCommands(commands.Cog):
 
         if memories:
             lines = [f"• **{m.key}**: `{m.value}` (conf: {m.confidence:.2f}, uses: {m.usage_count})" for m in memories]
-            embed.description = "\n".join(lines)
+            embed.description = "\n".join(lines)[:3900]
         else:
             embed.description = "*No persistent facts recorded for this user.*"
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
     # ────────────────────────────────────────────
     # /memory_reset — reset user memory
     # ────────────────────────────────────────────
     @app_commands.command(name="memory_reset", description="Reset persistent memory for a user")
-    @app_commands.describe(user_id="Platform canonical ID or Discord user mention")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
-    async def memory_reset(self, interaction: discord.Interaction, user_id: str):
+    @app_commands.describe(user_id="Discord mention, stable platform ID, or full scoped canonical ID", scope="Current Discord context or legacy unscoped storage")
+    @app_commands.choices(scope=[app_commands.Choice(name="Current Discord context", value="current"), app_commands.Choice(name="Legacy / unscoped", value="legacy")])
+    @operator_only()
+    @operator_callback
+    async def memory_reset(self, interaction: discord.Interaction, user_id: str, scope: str = "current"):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
         mem_svc = getattr(self.bot, "memory_service", None)
         if not mem_svc:
-            await interaction.followup.send("❌ Memory service not active.", ephemeral=True)
+            await send_response(interaction, "❌ Memory service not active.", ephemeral=True)
             return
 
-        clean_id = user_id.replace("<@", "").replace(">", "").replace("!", "").strip()
-        canonical_id = f"discord:{clean_id}" if ":" not in clean_id else clean_id
+        canonical_id = self.memory_target(interaction, user_id, scope)
+        async def reset(event):
+            persisted = await mem_svc.run_async(mem_svc.delete_user_memories, canonical_id)
+            result = f"✅ Persistent facts reset for `{canonical_id}`."
+            if persisted is False:
+                result += " SQLite is unavailable; this reset is pending recovery."
+            await event.edit_original_response(content=result, embed=None, view=None)
+        view = ConfirmView(interaction.user.id, reset)
+        await send_response(interaction, f"Delete all persistent facts for `{canonical_id}`? Profile and recent conversation history are retained. This confirmation expires in 60 seconds.", view=view, ephemeral=True)
+        await view.bind(interaction)
 
-        if mem_svc.delete_user_memories(canonical_id) is False:
-            await interaction.followup.send(
-                f"⚠️ Reset memories for `{canonical_id}` in memory only; the database is unavailable. "
-                "The reset will be applied when it recovers.",
-                ephemeral=True,
-            )
-            return
-        await interaction.followup.send(f"✅ Reset all persistent memories for `{canonical_id}`.", ephemeral=True)
+    def memory_target(self, interaction, value, scope):
+        clean = value.replace("<@", "").replace(">", "").replace("!", "").strip()
+        if not clean or len(clean) > 200:
+            raise ValueError("Provide a valid memory identity")
+        canonical = f"discord:{clean}" if ":" not in clean else clean
+        if canonical.startswith("scope:") or scope == "legacy" or not canonical.startswith("discord:"):
+            return canonical
+        guild = interaction.guild_id
+        context = f"discord:guild:{guild}" if guild else f"discord:dm:{canonical.split(':', 1)[1]}"
+        identity = getattr(self.bot, "identity_service", None)
+        links = getattr(identity, "_verified_mappings", {})
+        base = links.get(canonical, canonical) if isinstance(links, dict) else canonical
+        return f"scope:{context}|{base}"
 
     # ────────────────────────────────────────────
     # /rate_limit_status — check rate limits
     # ────────────────────────────────────────────
     @app_commands.command(name="rate_limit_status", description="Check rate limiter token budgets")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def rate_limit_status(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             return
 
         limiter = getattr(self.bot, "rate_limiter", None)
         if not limiter:
-            await interaction.followup.send("❌ Rate limiter not attached.", ephemeral=True)
+            await send_response(interaction, "❌ Rate limiter not attached.", ephemeral=True)
             return
 
         embed = discord.Embed(title="⏱️ Rate Limiter Budgets", color=discord.Color.teal())
@@ -347,7 +377,7 @@ class AdminCommands(commands.Cog):
         embed.add_field(name="Discord AI Tokens", value=f"{limiter.get_remaining('discord_ai'):.1f}", inline=True)
         embed.add_field(name="Idle Chat Tokens", value=f"{limiter.get_remaining('idle_chat'):.1f}", inline=True)
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await send_response(interaction, embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

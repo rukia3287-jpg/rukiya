@@ -25,6 +25,7 @@ class HealthPayloadTests(unittest.TestCase):
 
         self.assertEqual(payload, {
             "status": "degraded",
+            "command_sync_error": None,
             "discord_ready": True,
             "failed_cogs": ["cogs.shayari"],
             "memory_fallback_mode": True,

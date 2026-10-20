@@ -20,6 +20,8 @@ from services.rate_limiter import RateLimiter
 from services.orchestrator import RukiyaOrchestrator
 from services.ai_engine import AIEngine
 from services.runtime_status import build_health_payload, shutdown_services
+from services.discord_ui import handle_error
+from services.logging_utils import SecretRedactingFormatter
 
 # Logging
 logging.basicConfig(
@@ -33,6 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(SecretRedactingFormatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
 
 
 class RukiyaBot(commands.Bot):
@@ -41,12 +47,17 @@ class RukiyaBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
+        intents.members = os.getenv("DISCORD_MEMBER_WELCOMES_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
 
         super().__init__(
             command_prefix="!",
             intents=intents,
-            help_command=None
+            help_command=None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
+
+        self.tree.on_error = handle_error
+        self.command_sync_error = None
 
         # Load centralized configuration
         self.config = Config(
@@ -107,9 +118,11 @@ class RukiyaBot(commands.Bot):
 
         try:
             synced = await self.tree.sync()
+            self.command_sync_error = None
             logger.info(f"🌐 Synced {len(synced)} slash commands")
         except Exception as e:
-            logger.error(f"Slash command sync failed: {e}")
+            self.command_sync_error = type(e).__name__
+            logger.exception("Slash command sync failed")
 
     async def on_ready(self):
         logger.info(f"🚀 {self.user} is online!")
@@ -126,7 +139,7 @@ class RukiyaBot(commands.Bot):
 async def start_web_server(bot: RukiyaBot):
     async def health_check(request):
         # Always 200 so the host's liveness probe passes; the body reports degradation.
-        return web.json_response(build_health_payload(bot), status=200)
+        return web.json_response(await asyncio.to_thread(build_health_payload, bot), status=200)
 
     app = web.Application()
     app.router.add_get('/', health_check)

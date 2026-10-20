@@ -81,8 +81,18 @@ class Config:
     banned_words: Set[str] = field(default_factory=set)
     ai_triggers: Set[str] = field(default_factory=set)
 
+    operator_ids: Set[str] = field(default_factory=set)
+    welcome_youtube_guild_ids: Set[str] = field(default_factory=set)
+
     def __post_init__(self):
         """Initialize default sets and load from environment variables"""
+
+        self.operator_ids = {str(x) for x in self.operator_ids} | {
+            value.strip() for value in os.getenv("OPERATOR_IDS", "").split(",") if value.strip().isdigit()
+        }
+        self.welcome_youtube_guild_ids = {str(x) for x in self.welcome_youtube_guild_ids} | {
+            value.strip() for value in os.getenv("WELCOME_YOUTUBE_GUILD_IDS", "").split(",") if value.strip().isdigit()
+        }
 
         # Bot usernames to ignore (won't trigger AI responses)
         if not self.bot_users:

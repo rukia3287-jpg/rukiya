@@ -61,7 +61,9 @@ class RepairEngine:
         compiler: ContextCompiler,
         critic: Critic,
         generate_fn: Callable[[List[dict]], Coroutine[Any, Any, AIProviderResult]],
-        recent_responses: Optional[List[str]] = None
+        recent_responses: Optional[List[str]] = None,
+        verified_current_information: bool = True,
+        search_failed: bool = False,
     ) -> Tuple[str, int, CriticReport]:
         """
         Iterates up to max_attempts to fix critic issues.
@@ -74,7 +76,8 @@ class RepairEngine:
         # Try fast local deterministic repair first
         cleaned = self.apply_deterministic_repairs(current_text, critic.max_length)
         report_after_clean = critic.evaluate(
-            cleaned, request, plan, evidence_items, recent_responses
+            cleaned, request, plan, evidence_items, recent_responses,
+            verified_current_information=verified_current_information, search_failed=search_failed
         )
         if report_after_clean.verdict == CriticVerdict.PASS:
             logger.info("Deterministic repair resolved critic issue.")
@@ -93,7 +96,10 @@ class RepairEngine:
                 request=request,
                 plan=plan,
                 evidence_items=evidence_items,
-                repair_instruction=instruction
+                repair_instruction=instruction,
+                search_attempted=search_failed or bool(evidence_items),
+                search_succeeded=verified_current_information and bool(evidence_items),
+                verified_current_information=verified_current_information,
             )
 
             try:
@@ -105,7 +111,8 @@ class RepairEngine:
                 cand_text = self.apply_deterministic_repairs(res.text, critic.max_length)
                 current_text = cand_text
                 current_report = critic.evaluate(
-                    current_text, request, plan, evidence_items, recent_responses
+                    current_text, request, plan, evidence_items, recent_responses,
+                    verified_current_information=verified_current_information, search_failed=search_failed
                 )
 
                 if current_report.verdict == CriticVerdict.PASS:

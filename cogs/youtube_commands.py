@@ -1,10 +1,13 @@
+from services.discord_ui import defer_response, send_response, StatusView
 # cogs/youtube_commands.py
 import asyncio
+from services.chat_monitor import ChatMonitor
 import logging
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+from services.access import operator_only, operator_callback
 
 logger = logging.getLogger(__name__)
 
@@ -16,39 +19,41 @@ class YouTubeCommands(commands.Cog):
 
     @app_commands.command(name="start", description="Start monitoring a YouTube live video")
     @app_commands.describe(video_id="YouTube video id (from the watch URL)")
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def start_monitoring(self, interaction: discord.Interaction, video_id: str):
         """Start monitoring YouTube chat (safe, non-blocking)"""
         try:
             if not interaction.response.is_done():
-                await interaction.response.defer(thinking=True)
+                await defer_response(interaction, thinking=True)
         except Exception:
             logger.exception("Failed to defer in /start; continuing")
 
         if getattr(self.bot, "chat_monitor", None) is None or getattr(self.bot, "youtube_service", None) is None:
-            await interaction.followup.send("❌ Chat monitor or YouTube service not configured on the bot.", ephemeral=True)
+            await send_response(interaction, "❌ Chat monitor or YouTube service not configured on the bot.", ephemeral=True)
             return
 
         if self.bot.chat_monitor.is_running:
-            await interaction.followup.send("⚠️ Bot is already running. Use /stop to stop first.", ephemeral=True)
+            await send_response(interaction, "⚠️ Bot is already running. Use /stop to stop first.", ephemeral=True)
             return
 
         # Authenticate YouTube (blocking -> run in thread)
         ok = await asyncio.to_thread(self.bot.youtube_service.authenticate)
         if not ok:
-            await interaction.followup.send("❌ YouTube authentication failed. Check credentials / TOKEN_JSON / CLIENT_SECRET_JSON.", ephemeral=True)
+            await send_response(interaction, "❌ YouTube authentication failed. Check credentials / TOKEN_JSON / CLIENT_SECRET_JSON.", ephemeral=True)
             return
 
         # Get live chat id in thread
         live_chat_id = await asyncio.to_thread(self.bot.youtube_service.get_live_chat_id, video_id)
         if not live_chat_id:
-            await interaction.followup.send(f"❌ Could not find an active live chat for video id `{video_id}`. Is the stream live?", ephemeral=True)
+            await send_response(interaction, f"❌ Could not find an active live chat for video id `{video_id}`. Is the stream live?", ephemeral=True)
             return
 
         # Start monitoring
-        started = self.bot.chat_monitor.start_monitoring(live_chat_id, video_id)
+        cm = self.bot.chat_monitor
+        started = await cm.start_async(live_chat_id, video_id) if isinstance(cm, ChatMonitor) else cm.start_monitoring(live_chat_id, video_id)
         if not started:
-            await interaction.followup.send(
+            await send_response(interaction,
                 "❌ Could not start the YouTube monitor because another monitor task is still stopping. Try /start again in a few seconds.",
                 ephemeral=True,
             )
@@ -59,38 +64,45 @@ class YouTubeCommands(commands.Cog):
         embed.add_field(name="Chat ID", value=f"`{live_chat_id}`", inline=True)
         embed.add_field(name="Status", value="🟢 Monitoring", inline=True)
 
-        await interaction.followup.send(embed=embed)
+        await send_response(interaction, embed=embed)
 
     @app_commands.command(name="stop", description="Stop monitoring YouTube chat")
-    @app_commands.checks.has_permissions(administrator=True)
+    @operator_only()
+    @operator_callback
     async def stop_monitoring(self, interaction: discord.Interaction):
         try:
             if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
+                await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
         if getattr(self.bot, "chat_monitor", None) is None:
-            await interaction.followup.send("❌ Chat monitor not configured.", ephemeral=True)
+            await send_response(interaction, "❌ Chat monitor not configured.", ephemeral=True)
             return
 
         if not self.bot.chat_monitor.is_running:
-            await interaction.followup.send("⚠️ Bot is not running.", ephemeral=True)
+            await send_response(interaction, "⚠️ Bot is not running.", ephemeral=True)
             return
 
-        self.bot.chat_monitor.stop_monitoring()
-        await interaction.followup.send("🛑 Monitoring stopped.", ephemeral=True)
+        cm = self.bot.chat_monitor
+        if isinstance(cm, ChatMonitor):
+            await cm.stop_async()
+        else:
+            cm.stop_monitoring()
+        await send_response(interaction, "🛑 Monitoring stopped.", ephemeral=True)
 
     @app_commands.command(name="yt_status", description="Get basic YouTube monitoring status")
+    @operator_only()
+    @operator_callback
     async def yt_status(self, interaction: discord.Interaction):
         try:
-            await interaction.response.defer(ephemeral=True)
+            await defer_response(interaction, ephemeral=True)
         except Exception:
             pass
 
         cm = getattr(self.bot, "chat_monitor", None)
         if not cm:
-            await interaction.followup.send("❌ Chat monitor missing.", ephemeral=True)
+            await send_response(interaction, "❌ Chat monitor missing.", ephemeral=True)
             return
 
         st = cm.get_status()
@@ -104,7 +116,9 @@ class YouTubeCommands(commands.Cog):
             when = f" ({age:.0f}s ago)" if age is not None else ""
             embed.add_field(name="Last YouTube API error", value=f"`{st['last_error']}`{when}", inline=False)
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        view = StatusView(interaction.user.id, lambda event: self.yt_status.callback(self, event))
+        await send_response(interaction, embed=embed, view=view, ephemeral=True)
+        await view.bind(interaction)
 
 
 async def setup(bot: commands.Bot):
