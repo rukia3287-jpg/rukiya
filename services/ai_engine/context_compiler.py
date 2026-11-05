@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Base persona system instruction
 # Keep language behavior centralized here so every AI Engine route follows the same rule.
-from services.persona import RUKIYA_SYSTEM_PROMPT, INJECTION_GUARD_PROMPT, format_history, format_reply, turn_guidance
+from services.persona import RUKIYA_SYSTEM_PROMPT, INJECTION_GUARD_PROMPT, escape_context, format_history, format_reply, turn_guidance
 
 
 class ContextCompiler:
@@ -70,7 +70,7 @@ class ContextCompiler:
                 c = getattr(m, "confidence", 0.9) if not isinstance(m, dict) else m.get("confidence", 0.9)
                 score = self.score_memory(k, v, c, request.text)
                 if score >= 0.35:
-                    scored_mems.append((score, f"- {k}: {v}"))
+                    scored_mems.append((score, escape_context(f"- {k}: {v}")))
             scored_mems.sort(key=lambda x: x[0], reverse=True)
             if scored_mems:
                 mem_lines = [line for _, line in scored_mems[:8]]
@@ -84,7 +84,7 @@ class ContextCompiler:
             for sm in request.stream_memory[:8]:
                 k = getattr(sm, "key", "") if not isinstance(sm, dict) else sm.get("key", "")
                 v = getattr(sm, "value", "") if not isinstance(sm, dict) else sm.get("value", "")
-                stream_lines.append(f"- (session) {k}: {v}")
+                stream_lines.append(escape_context(f"- (session) {k}: {v}"))
             if stream_lines:
                 context_blocks.append(
                     "<stream_context>\n" + "\n".join(stream_lines) + "\n</stream_context>"
@@ -103,7 +103,7 @@ class ContextCompiler:
             evidence_lines = []
             for i, ev in enumerate(evidence_items[:5], 1):
                 clean_snippet = ev.snippet.replace("\r", " ").replace("\n", " ").strip()
-                evidence_lines.append(f"[{i}] {ev.title} ({ev.url}): {clean_snippet[:200]}")
+                evidence_lines.append(escape_context(f"[{i}] {ev.title} ({ev.url}): {clean_snippet[:200]}"))
             if evidence_lines:
                 context_blocks.append(
                     "<evidence_data>\nVerified search information:\n"
@@ -116,7 +116,7 @@ class ContextCompiler:
                 f"search_attempted=true\n"
                 f"search_succeeded=false\n"
                 f"verified_current_information=false\n"
-                f"search_failure_reason={search_failure_reason or 'rate_limited'}\n"
+                f"search_failure_reason={escape_context(search_failure_reason or 'rate_limited')}\n"
                 f"</search_status>"
             )
 
@@ -138,7 +138,7 @@ class ContextCompiler:
         elif (plan.freshness_required or plan.search_required) and search_attempted and not search_succeeded:
             prompt_instruction = (
                 "CRITICAL ANTI-HALLUCINATION DIRECTIVE: Real-time search verification failed and fresh information could not be verified "
-                f"({search_failure_reason or 'search unavailable'}). You MUST NOT guess, invent, fabricate, or hallucinate current real-time facts, "
+                "(see search_status). You MUST NOT guess, invent, fabricate, or hallucinate current real-time facts, "
                 "live prices, today's news, or current release statuses. Transparently and briskly state in Rukiya's character that you cannot "
                 "verify the latest/current information right now."
             )
@@ -171,7 +171,7 @@ class ContextCompiler:
         context_str = "\n\n".join(context_blocks) + "\n\n" if context_blocks else ""
         current_content = (
             f"{context_str}<user_message>\n"
-            f"[Stream viewer '{request.author}' says]: {request.text}\n"
+            f"[Stream viewer '{escape_context(request.author)}' says]: {escape_context(request.text)}\n"
             f"</user_message>\n\n"
             f"{prompt_instruction}"
         )

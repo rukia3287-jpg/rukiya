@@ -18,6 +18,8 @@ from services.ai_engine.models import (
     Plan,
 )
 from services.config import Config
+from services.persona import truncate_reply
+from services.safety_service import STAGE_DIRECTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -38,18 +40,13 @@ class RepairEngine:
             cleaned = cleaned[1:-1].strip()
 
         # Remove stage directions (*sighs*, (yawns))
-        cleaned = re.sub(r"(\*[^*]+\*|\([^)]{2,}\))", "", cleaned).strip()
+        cleaned = STAGE_DIRECTIONS.sub("", cleaned).strip()
 
         # Collapse whitespace
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
         # Length clamp
-        if len(cleaned) > max_length:
-            trimmed = cleaned[:max_length]
-            last_dot = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-            cleaned = trimmed[:last_dot + 1] if last_dot > 0 else trimmed + "..."
-
-        return cleaned
+        return truncate_reply(cleaned, max_length)
 
     async def execute_repair_loop(
         self,

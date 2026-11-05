@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from services.config import Config
@@ -52,6 +53,10 @@ class MemoryService:
         self._request_session = ContextVar(f'memory_session_{id(self)}', default=None)
         self.config = config or Config()
         self.db_path = getattr(self.config, "db_path", "rukiya_memory.db")
+        # SQLite ':memory:' belongs to one connection. Keep an anchor alive so
+        # the short-lived worker connections share this service's private database.
+        self._memory_db_uri = f"file:rukiya_{uuid.uuid4().hex}?mode=memory&cache=shared" if self.db_path == ":memory:" else None
+        self._memory_db_anchor = None
         self.decay_constant = float(getattr(self.config, "memory_decay_days", 30.0))
         self.max_memory_per_user = int(getattr(self.config, "max_memory_per_user", 30))
         self.max_stream_memory = int(getattr(self.config, "max_stream_memory", 20))
@@ -260,7 +265,12 @@ class MemoryService:
 
     def _open_connection(self) -> Optional[sqlite3.Connection]:
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            if self._memory_db_uri:
+                if self._memory_db_anchor is None:
+                    self._memory_db_anchor = sqlite3.connect(self._memory_db_uri, uri=True, check_same_thread=False)
+                conn = sqlite3.connect(self._memory_db_uri, uri=True, timeout=5.0)
+            else:
+                conn = sqlite3.connect(self.db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -608,6 +618,12 @@ class MemoryService:
             "text": text,
             "timestamp": now
         }
+        # Hydrate before the first new turn after a restart. Otherwise the cache
+        # hides persisted history as soon as this one message is appended.
+        if sid not in self._in_memory_recent_messages:
+            self._in_memory_recent_messages[sid] = self.get_recent_messages(
+                session_id=sid, limit=self.max_context_messages
+            )
         self._in_memory_recent_messages.setdefault(sid, []).append(msg_record)
         if len(self._in_memory_recent_messages[sid]) > self.max_context_messages * 2:
             self._in_memory_recent_messages[sid] = self._in_memory_recent_messages[sid][-self.max_context_messages:]

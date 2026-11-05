@@ -33,6 +33,7 @@ from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
+from services.persona import truncate_reply
 from services.language import ENGLISH, detect_reply_language
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, FALLBACK_INTENTS, localize_fallback, validate_rukiya_response
 
@@ -524,11 +525,6 @@ class AIEngine:
             # Telemetry: the global cap, not a provider failure, is why nothing answered.
             fallback_reason = "budget_exhausted"
 
-        # One logical request costs one unit of the user's daily AI budget, however many
-        # provider operations (search + synthesis, backup) served it. Static fallbacks are free.
-        if user_reserved and final_provider in ("none", "static_fallback"):
-            self.budget_manager.refund_user_request(request.user_id)
-
         # 4. Self-Critic & Repair Loop
         if candidate_text and final_provider != "static_fallback":
             report = self.critic.evaluate(
@@ -547,18 +543,23 @@ class AIEngine:
                     target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
                     return await self._generate(target_prov, msgs, track_health=False)  # type: ignore[arg-type]
 
-                repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
-                    initial_text=candidate_text,
-                    initial_report=report,
-                    request=request,
-                    plan=plan,
-                    evidence_items=evidence_items,
-                    compiler=self.compiler,
-                    critic=self.critic,
-                    generate_fn=_repair_gen,
-                    verified_current_information=verified_current_information,
-                    search_failed=(search_attempted and not search_succeeded),
-                )
+                try:
+                    repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
+                        initial_text=candidate_text,
+                        initial_report=report,
+                        request=request,
+                        plan=plan,
+                        evidence_items=evidence_items,
+                        compiler=self.compiler,
+                        critic=self.critic,
+                        generate_fn=_repair_gen,
+                        verified_current_information=verified_current_information,
+                        search_failed=(search_attempted and not search_succeeded),
+                    )
+                except asyncio.CancelledError:
+                    if user_reserved:
+                        self.budget_manager.refund_user_request(request.user_id)
+                    raise
                 candidate_text = repaired_text
                 repair_count = rep_count
 
@@ -587,12 +588,17 @@ class AIEngine:
                 final_provider = "static_fallback"
 
             max_len = int(getattr(self.config, "max_message_length", 250))
-            if len(validated) > max_len:
-                trimmed = validated[:max_len]
-                last_dot = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-                validated = trimmed[:last_dot + 1] if last_dot > 0 else trimmed + "..."
+            validated = truncate_reply(validated, max_len)
         else:
             validated = candidate_text.strip()
+
+        # Decide whether the viewer was served only after critic, repair and output
+        # safety have finished. Provider dispatches still count against the global cap.
+        if final_provider == "static_fallback":
+            provider_used = "static_fallback"
+            executed_route = "static_fallback"
+        if user_reserved and final_provider in ("none", "static_fallback"):
+            self.budget_manager.refund_user_request(request.user_id)
 
         total_latency_ms = (time.time() - start_time) * 1000.0
 

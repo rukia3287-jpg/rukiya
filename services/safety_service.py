@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from services.models import ChatMessage, GeneratedResponse, SafetyResult
 
 from services.language import ENGLISH, HINDI, HINGLISH, ROMAN_TELUGU, TELUGU
+from services.persona import truncate_reply
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,8 @@ UNSAFE_OUTPUT_PATTERNS = [
     r"\b(?:die|murder|suicide)\b",
     r"\b(?:you are banned|i have banned you)\b"  # Fake moderation claims
 ]
+
+STAGE_DIRECTIONS = re.compile("|".join(UNSAFE_OUTPUT_PATTERNS[:2]), re.IGNORECASE)
 
 FALLBACK_INTENTS: Dict[str, str] = {
     # Serious messages never get persona snark, even when generation fails or is blocked.
@@ -211,7 +214,7 @@ def validate_rukiya_response(reply: str, fallback: str = DEFAULT_VALIDATOR_FALLB
     if cleaned.count("*") > 0 or len(re.findall(r"[\U0001F300-\U0001FAFF]", cleaned)) > 1:
         return fallback
 
-    return cleaned[:250]
+    return truncate_reply(cleaned, 250)
 
 
 class SafetyService:

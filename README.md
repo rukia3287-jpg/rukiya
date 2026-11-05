@@ -88,6 +88,12 @@ Rukiya V2 introduces a major architectural evolution by establishing strict serv
 
 ---
 
+## Discord conversation behavior
+
+Mention Rukiya, call her by name, reply to one of her messages, or send a DM to start a conversation. In a server channel, the same viewer can continue without another tag for 90 seconds after a successful reply. Another human speaker, a reply to someone else, or a mention of someone else ends that implicit conversation; an explicit call still works. Existing cooldowns and AI budgets apply to follow-ups too. Repeated mentions while that viewer's answer is generating do not start more provider calls.
+
+Explicit replies to older bot messages fetch the target when it is no longer cached by Discord. Conversation history stays scoped to its channel, survives a restart with SQLite, and same-viewer turns are processed in order. Legitimate repeated factual answers are retained rather than replaced with social fallback text. Repairs preserve factual parentheses and enforce the reply limit without adding an ellipsis beyond it.
+
 ## ⚙️ Environment Variables & Configuration
 
 Configure these variables in your `.env` file or hosting environment (e.g. Render):
@@ -238,6 +244,9 @@ No test makes a live provider call; providers are stubbed. Test modules should n
 
 Run specific test modules:
 ```bash
+# Conversation ordering, restart context, Discord follow-ups, and repair budgets
+python -m unittest discover -s tests -p "test_conversation_repairs.py" -v
+
 # Goal regressions (Quota handling, safety contracts, sleep intervals)
 python -m unittest tests/test_goal_regressions.py
 

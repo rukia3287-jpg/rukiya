@@ -8,7 +8,9 @@ Rate Limiter -> AI Generation -> Output Safety -> Anti-Repetition -> Memory Reco
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
+from weakref import WeakValueDictionary
 from typing import Any, Dict, Optional
 
 from services.ai_engine.engine import AIEngine
@@ -48,12 +50,18 @@ class RukiyaOrchestrator:
         self.rate_limiter = rate_limiter or RateLimiter(self.config)
         self.ai_service = ai_service or AIService(self.config)
         self.ai_engine = ai_engine
+        self._turn_locks = WeakValueDictionary()
 
     async def process_message(self, message: ChatMessage, bypass_trigger=False, bypass_cooldown=False):
         from services.scopes import conversation_scope
         scope = conversation_scope(message, self.memory_service.active_session_id)
-        with self.memory_service.session_scope(scope):
-            return await self._process_message(message, bypass_trigger, bypass_cooldown)
+        # A viewer's next turn must see the previous answer. Other viewers and
+        # channels stay concurrent; unused locks disappear rather than accumulating.
+        key = (scope, message.platform, message.user_id or message.username or message.display_name)
+        lock = self._turn_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            with self.memory_service.session_scope(scope):
+                return await self._process_message(message, bypass_trigger, bypass_cooldown)
 
     async def _process_message(
         self,
@@ -188,9 +196,13 @@ class RukiyaOrchestrator:
         # 8. Output Safety Validation
         is_safe, validated_text = self.safety_service.validate_output(generated.text, intent=decision.intent, language=language)
         generated.text = validated_text
+        if not is_safe:
+            generated.is_fallback = True
 
         # 9. Anti-Repetition Check
-        if self.decision_service.is_repetitive(generated.text):
+        # Factual answers and serious support can legitimately repeat. Replacing
+        # the same correct answer with social filler loses the viewer's request.
+        if decision.intent not in {"question", "help", *SERIOUS_INTENT_INSTRUCTIONS} and self.decision_service.is_repetitive(generated.text):
             logger.info("event=repetition_detected")
             # Use fallback instead of repeating
             generated.text = self.safety_service.get_fallback(decision.intent, language)

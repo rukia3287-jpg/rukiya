@@ -4,6 +4,7 @@ import re
 import time
 import asyncio
 import logging
+import math
 from typing import Optional
 
 import aiohttp
@@ -26,6 +27,8 @@ DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 RUKIYA_SYSTEM_PROMPT = SAFE_RUKIYA_SYSTEM_PROMPT
 class RukiyaCog(commands.Cog):
     """Discord Cog — wires ChatMonitor ↔ OpenRouter for Rukiya (Bleach) persona"""
+
+    DISCORD_FOLLOWUP_SECONDS = 90.0
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -58,7 +61,13 @@ class RukiyaCog(commands.Cog):
         self._last_sent_at = 0.0
         # Discord cooldown is per-user. YouTube/auto-reply activity is separate.
         self._last_discord_reply_at = {}
-        self.discord_cooldown_seconds = float(os.environ.get("RUKIYA_DISCORD_COOLDOWN", "2.0"))
+        try:
+            cooldown = float(os.environ.get("RUKIYA_DISCORD_COOLDOWN", "2.0"))
+            self.discord_cooldown_seconds = max(0.0, cooldown) if math.isfinite(cooldown) else 2.0
+        except (TypeError, ValueError):
+            self.discord_cooldown_seconds = 2.0
+        self._discord_conversations = {}
+        self._discord_inflight_users = set()
         self._name_pattern = re.compile(r"\b(rukiya|rukia|ruki)\b", re.IGNORECASE)
 
     async def cog_load(self) -> None:
@@ -106,17 +115,40 @@ class RukiyaCog(commands.Cog):
 
         reference = getattr(message, "reference", None)
         referenced = getattr(reference, "resolved", None) or getattr(reference, "cached_message", None)
+        # Discord only caches recent messages. An older explicit reply still
+        # needs its target, including after a bot restart.
+        if referenced is None and reference is not None and getattr(reference, "message_id", None):
+            if getattr(reference, "channel_id", None) in (None, getattr(message.channel, "id", None)):
+                try:
+                    referenced = await message.channel.fetch_message(reference.message_id)
+                except discord.HTTPException:
+                    logger.debug("Discord reply target unavailable")
         reference_author = getattr(referenced, "author", None)
         is_reply_to_bot = bool(bot_user and getattr(reference_author, "id", None) == bot_user.id)
         is_direct_message = hasattr(message, "guild") and message.guild is None
 
-        if not (is_tagged or is_named or is_reply_to_bot or is_direct_message):
+        now = asyncio.get_running_loop().time()
+        user_id = message.author.id
+        channel_id = getattr(message.channel, "id", None)
+        conversation = self._discord_conversations.get(channel_id)
+        # Continue an addressed conversation briefly, without requiring a tag
+        # on every turn. Another speaker/reference/mention ends the implicit turn.
+        is_followup = bool(
+            channel_id is not None and conversation
+            and conversation[0] == user_id
+            and now - conversation[1] < self.DISCORD_FOLLOWUP_SECONDS
+            and reference is None and not message.mentions
+        )
+        if not is_followup:
+            self._discord_conversations.pop(channel_id, None)
+
+        if not (is_tagged or is_named or is_reply_to_bot or is_direct_message or is_followup):
             return
 
         # Cooldown is per Discord user, so one user's recent reply cannot
         # silence another user's explicit call to Rukiya.
-        now = asyncio.get_event_loop().time()
-        user_id = message.author.id
+        if user_id in self._discord_inflight_users:
+            return
         last_user_reply = self._last_discord_reply_at.get(user_id, 0.0)
         if now - last_user_reply < self.discord_cooldown_seconds:
             return
@@ -125,6 +157,10 @@ class RukiyaCog(commands.Cog):
         # Start the per-user cooldown now, not after the reply: repeated mentions while a
         # reply is generating must not drain the shared discord_ai bucket for everyone.
         self._remember_discord_reply(user_id)
+        self._discord_inflight_users.add(user_id)
+        pending_turn = (user_id, float("-inf"))
+        if channel_id is not None:
+            self._discord_conversations[channel_id] = pending_turn
 
         # Clean prompt by stripping bot mention tag
         cleaned_text = message.content
@@ -168,8 +204,22 @@ class RukiyaCog(commands.Cog):
                 if reply:
                     self._remember_discord_reply(user_id)
                     await message.reply(reply, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    # Do not reopen a conversation if someone else spoke while
+                    # generation was in flight.
+                    if channel_id is not None and self._discord_conversations.get(channel_id) is pending_turn:
+                        sent_at = asyncio.get_running_loop().time()
+                        self._discord_conversations[channel_id] = (user_id, sent_at)
+                        if len(self._discord_conversations) > 1000:
+                            self._discord_conversations = {
+                                cid: turn for cid, turn in self._discord_conversations.items()
+                                if sent_at - turn[1] < self.DISCORD_FOLLOWUP_SECONDS
+                            }
         except Exception as e:
             logger.exception(f"Failed to reply to Discord message: {e}")
+        finally:
+            self._discord_inflight_users.discard(user_id)
+            if self._discord_conversations.get(channel_id) is pending_turn:
+                self._discord_conversations.pop(channel_id, None)
 
     def _discord_ai_allowed(self) -> bool:
         """Consume one token from the configured discord_ai bucket (RATE_LIMIT_DISCORD_CAPACITY).

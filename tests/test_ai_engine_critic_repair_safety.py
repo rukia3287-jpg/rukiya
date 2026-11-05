@@ -98,8 +98,8 @@ class TestAIEngineCriticRepairSafety(unittest.IsolatedAsyncioTestCase):
         req = AIEngineRequest(text="tell me about yourself", author="viewer")
         plan = Plan(intent="chatter")
 
-        # Initial bad reply (exceeds max length)
-        initial_reply = "A" * 300
+        # Keep a semantic defect after local length repair succeeds.
+        initial_reply = "As an AI language model " + "A" * 300
         init_report = self.critic.evaluate(initial_reply, req, plan)
         self.assertEqual(init_report.verdict, CriticVerdict.REPAIR)
 

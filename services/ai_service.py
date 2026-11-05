@@ -27,7 +27,7 @@ from services.safety_service import (
 
 logger = logging.getLogger(__name__)
 
-from services.persona import RUKIYA_SYSTEM_PROMPT, INJECTION_GUARD_PROMPT, format_history, format_reply, turn_guidance
+from services.persona import RUKIYA_SYSTEM_PROMPT, INJECTION_GUARD_PROMPT, escape_context, format_history, format_reply, turn_guidance, truncate_reply
 
 
 class AIService:
@@ -76,15 +76,15 @@ class AIService:
         memory_lines = []
         if persistent_memory:
             for m in persistent_memory[:8]:
-                memory_lines.append(f"- {m.key}: {m.value}")
+                memory_lines.append(escape_context(f"- {m.key}: {m.value}"))
 
         if stream_memory:
             for sm in stream_memory[:8]:
-                memory_lines.append(f"- (stream) {sm.key}: {sm.value}")
+                memory_lines.append(escape_context(f"- (stream) {sm.key}: {sm.value}"))
 
         user_context_block = ""
         if memory_lines:
-            user_context_block = f"Known context about viewer '{author}':\n" + "\n".join(memory_lines) + "\n\n"
+            user_context_block = f"Known context about viewer '{escape_context(author)}':\n" + "\n".join(memory_lines) + "\n\n"
 
         # Add recent conversation history (max 8 messages)
         if recent_messages:
@@ -110,7 +110,7 @@ class AIService:
         prompt_instruction += "\n" + turn_guidance(user_message, bool(recent_messages), bool(reply_to_text))
         if user_context_block:
             user_context_block = "<untrusted_context>\n" + user_context_block + "</untrusted_context>\n"
-        current_content = f"{user_context_block}[Stream viewer '{author}' says]: {user_message}\n\n{prompt_instruction}"
+        current_content = f"{user_context_block}<user_message>\n[Stream viewer '{escape_context(author)}' says]: {escape_context(user_message)}\n</user_message>\n\n{prompt_instruction}"
         messages.append({"role": "user", "content": current_content})
         return messages
 
@@ -129,7 +129,7 @@ class AIService:
                 {
                     "role": "user",
                     "content": (
-                        f"[Stream viewer '{author}' says]: {messages_or_prompt}\n\n"
+                        f"<user_message>\n[Stream viewer '{escape_context(author)}' says]: {escape_context(messages_or_prompt)}\n</user_message>\n\n"
                         "Reply as Rukiya — short, punchy, in-character. 1-2 short sentences max. Detect the language of the current viewer message and answer in that same language; preserve Roman/Latin script for Romanized language."
                     )
                 }
@@ -231,10 +231,7 @@ class AIService:
             return None
 
         # Enforce max length constraint
-        if len(validated) > self.max_message_length:
-            trimmed = validated[:self.max_message_length]
-            last_dot = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-            validated = trimmed[:last_dot + 1] if last_dot > 0 else trimmed + "..."
+        validated = truncate_reply(validated, self.max_message_length)
 
         self.last_used = time.time()
 
@@ -304,10 +301,7 @@ class AIService:
             if not bypass_cooldown:
                 self.last_used = time.time()
 
-            if len(raw) > self.max_message_length:
-                trimmed = raw[:self.max_message_length]
-                last_dot = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-                raw = trimmed[:last_dot + 1] if last_dot > 0 else trimmed + "..."
+            raw = truncate_reply(raw, self.max_message_length)
 
             logger.info("Rukiya replies to %s: %s", author, raw)
             return raw

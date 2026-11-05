@@ -15,10 +15,11 @@ from services.ai_engine.models import (
     Plan,
 )
 from services.config import Config
+from services.safety_service import STAGE_DIRECTIONS
 
 logger = logging.getLogger(__name__)
 
-BANNED_STAGE_DIRECTIONS = re.compile(r"(\*[^*]+\*|\([^)]{2,}\))")
+BANNED_STAGE_DIRECTIONS = STAGE_DIRECTIONS
 BOT_CLICHE_PATTERNS = [
     "as an ai", "as a language model", "i do not possess feelings",
     "i cannot feel", "how can i help you today", "how can i assist you"
@@ -85,7 +86,7 @@ class Critic:
                 verdict=CriticVerdict.REPAIR,
                 score=0.5,
                 reasons=reasons,
-                repair_instruction="Remove all asterisks, parentheses, and roleplay action descriptors."
+                repair_instruction="Remove roleplay actions and asterisks; preserve factual parenthetical details."
             )
 
         # 5. Length Check
