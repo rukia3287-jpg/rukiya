@@ -7,6 +7,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import hashlib
+from collections import Counter, deque
+from contextvars import ContextVar
 from typing import List, Optional, Tuple
 
 from services.ai_engine.budget import BudgetManager
@@ -33,6 +36,7 @@ from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.repair import RepairEngine
 from services.ai_engine.router import Router
 from services.config import Config
+from services.brain import LocalSkills
 from services.language import ENGLISH, detect_reply_language
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS, FALLBACK_INTENTS, localize_fallback, validate_rukiya_response
 
@@ -88,6 +92,15 @@ class AIEngine:
             default_ttl=getattr(self.config, "gemini_search_cache_ttl", 300)
         )
         self.deduplicator = deduplicator or InFlightDeduplicator()
+        self.local_skills = LocalSkills()
+        self._external_policy = ContextVar(f'external_{id(self)}', default=True)
+        self._user_reservation = ContextVar(f'reservation_{id(self)}', default=None)
+        self._search_scope = ContextVar(f'search_scope_{id(self)}', default='')
+        self._search_owner = ContextVar(f'search_owner_{id(self)}', default='')
+        self._active_tasks = set()
+        self._closed = False
+        self.provider_operations = Counter()
+        self.request_metrics = deque(maxlen=200)
 
         # Synchronize Gemini provider with health tracker if registered
         gemini = self.registry.get("gemini")
@@ -115,7 +128,11 @@ class AIEngine:
                 )
             )
         name = provider.name
-        if not self.budget_manager.try_reserve_generation(name):
+        if name != 'local' and not (self.config.external_ai_enabled and self._external_policy.get()):
+            return AIProviderResult('', name, error='External inference disabled by privacy policy')
+        if sum(len(str(message.get('content', ''))) for message in messages) > self.config.brain_context_chars:
+            return AIProviderResult('', name, error='Context exceeds configured size limit')
+        if name != 'local' and not self.budget_manager.try_reserve_generation(name):
             return AIProviderResult(
                 text="",
                 provider=name,
@@ -127,6 +144,7 @@ class AIEngine:
                     retryable=False
                 )
             )
+        self.provider_operations[name] += 1
         res = await self.executor.execute_generate(provider, messages)
         if track_health:
             self.health_tracker.record_call(f"{name}:generation", not bool(res.error), res.latency_ms, error=res.error_details)
@@ -143,16 +161,27 @@ class AIEngine:
         request_id: Optional[str] = None,
     ) -> Tuple[SearchResult, bool]:
         """Fetch search result from positive cache, negative cache, in-flight task, or Gemini provider."""
+        if not (self.config.external_ai_enabled and self._external_policy.get()):
+            return SearchResult(query=query, text='', success=False, error='External search disabled'), False
+        # Both positive/negative entries and in-flight tasks are private to the
+        # owning conversation. Stable IDs are case sensitive before hashing.
+        scope = self._search_scope.get()
+        owner = self._search_owner.get()
+        partition = hashlib.sha256(owner.encode()).hexdigest() if owner else ''
+        if partition:
+            scope_hash = hashlib.sha256(scope.encode()).hexdigest()
+            query_hash = hashlib.sha256(' '.join(query.casefold().split()).encode()).hexdigest()
+            time_scope = f'{time_scope}|{partition}|{scope_hash}|{query_hash}'
         # 1. Check positive cache
         cached = self.cache.get(query, time_scope=time_scope)
         if cached:
-            logger.debug("Search cache hit for query: '%s'", query)
+            logger.debug("Search cache hit")
             return cached, True
 
         # 2. Check negative cache (fast fail during outage/rate-limit)
-        neg = self.cache.get_negative(query)
+        neg = self.cache.get_negative(query, time_scope=time_scope)
         if neg:
-            logger.info("Search negative cache hit for query '%s' (category=%s, retry_after=%.1fs)", query, neg.category.value, neg.retry_after - time.time())
+            logger.info("Search negative cache hit category=%s", neg.category.value)
             return SearchResult(
                 query=query,
                 text="",
@@ -170,7 +199,7 @@ class AIEngine:
 
         # 3. Check circuit breaker specifically for gemini:search
         if not self.health_tracker.is_available("gemini:search") and "gemini:search" in getattr(self.health_tracker, "circuits", {}):
-            logger.warning("Circuit breaker OPEN for gemini:search; fast-failing query '%s'", query)
+            logger.warning("Circuit breaker OPEN for gemini:search")
             return SearchResult(
                 query=query,
                 text="",
@@ -222,6 +251,7 @@ class AIEngine:
                         retryable=False
                     )
                 )
+            self.provider_operations['gemini_search'] += 1
             res = await self.executor.execute_search(gemini, query=query, request_id=request_id)
             err_details = getattr(res, "error_details", None)
             if res.error and not err_details:
@@ -238,7 +268,7 @@ class AIEngine:
             if not is_success:
                 cat = err_details.category if err_details else ErrorCategory.UNKNOWN
                 # Store in negative cache so subsequent calls fail fast without network spam
-                self.cache.set_negative(query, category=cat, error_message=str(res.error))
+                self.cache.set_negative(query, category=cat, error_message=str(res.error), time_scope=time_scope)
                 return SearchResult(
                     query=query,
                     text="",
@@ -262,10 +292,44 @@ class AIEngine:
             self.cache.set(query, sr, category=category, time_scope=time_scope)
             return sr
 
-        result = await self.deduplicator.execute_or_join(query, _fetch)
+        cache_key = partition + hashlib.sha256(f'{scope}|{time_scope}|{query}'.encode()).hexdigest()
+        result = await self.deduplicator.execute_or_join(cache_key, _fetch)
         return result, False
 
     async def process(self, request: AIEngineRequest) -> AIEngineResult:
+        started = time.perf_counter()
+        if self._closed or not request.text.strip() or len(request.text) > self.config.brain_prompt_chars:
+            return AIEngineResult('That request is unavailable or too long.', fallback_used=True, error='request_rejected')
+        external = self._external_policy.set(bool(request.allow_external))
+        reservation = self._user_reservation.set(None)
+        scope = self._search_scope.set(f'{request.platform}|{request.canonical_id or request.user_id or request.request_id}|{request.conversation_scope}')
+        owner = self._search_owner.set(request.canonical_id or request.user_id or request.request_id)
+        task = asyncio.current_task()
+        self._active_tasks.add(task)
+        try:
+            async with asyncio.timeout(self.config.brain_timeout):
+                local = self.local_skills.respond(request)
+                if local is not None:
+                    result = AIEngineResult(local, provider='deterministic', route='deterministic', cost_class='free')
+                else:
+                    result = await self._process(request)
+                result.latency_ms = (time.perf_counter() - started) * 1000
+                self.request_metrics.append({'ms': result.latency_ms, 'route': result.executed_route, 'error': bool(result.error)})
+                return result
+        except TimeoutError:
+            return AIEngineResult(self.get_fallback('temporary_failure', detect_reply_language(request.text)),
+                                  fallback_used=True, error='request_timeout')
+        finally:
+            reserved = self._user_reservation.get()
+            if reserved:
+                self.budget_manager.refund_user_request(reserved)
+            self._user_reservation.reset(reservation)
+            self._external_policy.reset(external)
+            self._search_scope.reset(scope)
+            self._search_owner.reset(owner)
+            self._active_tasks.discard(task)
+
+    async def _process(self, request: AIEngineRequest) -> AIEngineResult:
         # Fallback replies follow the viewer's language and script.
         language = detect_reply_language(request.text)
 
@@ -293,6 +357,7 @@ class AIEngine:
         if route != RouteType.STATIC_FALLBACK:
             if self.budget_manager.try_reserve_user_request(request.user_id):
                 user_reserved = bool(request.user_id)
+                self._user_reservation.set(request.user_id if user_reserved else None)
             else:
                 route = RouteType.STATIC_FALLBACK
 
@@ -324,7 +389,33 @@ class AIEngine:
 
         # 3. Execution per Route
         try:
-            if route == RouteType.STATIC_FALLBACK:
+            if route == RouteType.LOCAL:
+                local = self.registry.get('local')
+                res = await self._generate(local, self.compiler.compile(request, plan))
+                if res.text and not res.error:
+                    candidate_text = res.text
+                    provider_used = final_provider = 'local'
+                elif self.config.external_ai_enabled and request.allow_external:
+                    # Preserve the existing primary/backup order after local failure.
+                    for target in (openrouter, gemini):
+                        if not target or not target.is_configured() or not self.health_tracker.is_available(target.name, capability='generation'):
+                            continue
+                        res = await self._generate(target, self.compiler.compile(request, plan))
+                        if res.text and not res.error:
+                            candidate_text = res.text
+                            provider_used = final_provider = target.name
+                            executed_route = 'local_external_fallback'
+                            break
+                    else:
+                        candidate_text = fallback(plan.intent)
+                        provider_used = final_provider = 'static_fallback'
+                        fallback_used, fallback_reason = True, 'local_and_external_failed'
+                else:
+                    candidate_text = fallback(plan.intent)
+                    provider_used = final_provider = 'static_fallback'
+                    fallback_used, fallback_reason = True, 'local_unavailable_external_disabled'
+
+            elif route == RouteType.STATIC_FALLBACK:
                 candidate_text = fallback(plan.intent)
                 fallback_used = True
                 fallback_reason = "static_fallback"
@@ -516,8 +607,6 @@ class AIEngine:
             error_msg = str(e)
         except asyncio.CancelledError:
             # A cancelled request (e.g. the YouTube monitor stopping) was not served.
-            if user_reserved:
-                self.budget_manager.refund_user_request(request.user_id)
             raise
 
         if final_provider == "static_fallback" and route != RouteType.STATIC_FALLBACK and self.budget_manager.generation_budget_exhausted():
@@ -528,6 +617,7 @@ class AIEngine:
         # provider operations (search + synthesis, backup) served it. Static fallbacks are free.
         if user_reserved and final_provider in ("none", "static_fallback"):
             self.budget_manager.refund_user_request(request.user_id)
+            self._user_reservation.set(None)
 
         # 4. Self-Critic & Repair Loop
         if candidate_text and final_provider != "static_fallback":
@@ -544,7 +634,7 @@ class AIEngine:
 
                 # Generator lambda for repair
                 async def _repair_gen(msgs: List[dict]) -> AIProviderResult:
-                    target_prov = openrouter if "openrouter" in final_provider else (gemini or openrouter)
+                    target_prov = self.registry.get('local') if final_provider == 'local' else openrouter if "openrouter" in final_provider else (gemini or openrouter)
                     return await self._generate(target_prov, msgs, track_health=False)  # type: ignore[arg-type]
 
                 repaired_text, rep_count, final_report = await self.repair_engine.execute_repair_loop(
@@ -595,6 +685,8 @@ class AIEngine:
             validated = candidate_text.strip()
 
         total_latency_ms = (time.time() - start_time) * 1000.0
+        if final_provider not in ('none', 'static_fallback'):
+            self._user_reservation.set(None)
 
         logger.info(
             "event=ai_engine_result req_id=%s planned_route=%s executed_route=%s provider=%s search_attempted=%s search_succeeded=%s verified_current=%s fallback=%s fallback_reason=%s hit=%s repairs=%d latency_ms=%.1f",
@@ -625,8 +717,22 @@ class AIEngine:
             fallback_reason=fallback_reason,
         )
 
+    async def clear_user_cache(self, canonical):
+        partition = hashlib.sha256(canonical.encode()).hexdigest()
+        await self.deduplicator.cancel_partition(partition)
+        self.cache.clear_partition(partition)
+
     async def aclose(self) -> None:
         """Cancel in-flight deduplicated search tasks and cleanly shut down resources."""
+        self._closed = True
+        active = self._active_tasks - {asyncio.current_task()}
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+        for provider in getattr(self.registry, '_providers', {}).values():
+            if hasattr(provider, 'aclose'):
+                await provider.aclose()
         if hasattr(self.deduplicator, "cancel_all"):
             res = self.deduplicator.cancel_all()
             if asyncio.iscoroutine(res):

@@ -36,7 +36,7 @@ class RukiyaCog(commands.Cog):
         self.api_key = os.environ.get(OPENROUTER_API_KEY_ENV)
 
         if not self.api_key:
-            logger.warning(f"{OPENROUTER_API_KEY_ENV} not set. RukiyaCog will not function.")
+            logger.warning("OpenRouter fallback is unconfigured; the unified Brain and local features remain available.")
 
         try:
             self.max_tokens = max(16, int(os.environ.get("RUKIYA_MAX_TOKENS", "180")))
@@ -237,7 +237,7 @@ class RukiyaCog(commands.Cog):
                 reply = await self.generate_reply(message, author)
 
             if not reply:
-                logger.debug("No YouTube reply generated for %s: %s", author, message[:120])
+                logger.debug("No YouTube reply generated")
                 return
 
             cm = getattr(self.bot, "chat_monitor", None)
@@ -251,17 +251,15 @@ class RukiyaCog(commands.Cog):
                 logger.info("YouTube reply delivered chars=%d", len(reply))
 
         except Exception:
-            logger.exception(
-                "YouTube auto-reply failed for author=%s message=%r",
-                author,
-                message[:120],
-            )
+            logger.exception("YouTube auto-reply failed")
 
     # ────────────────────────────────────────────
     # OpenRouter call (used by direct commands)
     # ────────────────────────────────────────────
     async def generate_reply(self, message: str, author: str = "viewer") -> Optional[str]:
         """Direct OpenRouter call with Rukiya Bleach persona."""
+        if getattr(getattr(self.bot, "config", None), "external_ai_enabled", True) is False:
+            return None
         if not self.api_key:
             raise RuntimeError(f"{OPENROUTER_API_KEY_ENV} not configured")
 
@@ -296,7 +294,7 @@ class RukiyaCog(commands.Cog):
             async with self.session.post(url, json=payload, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    logger.error(f"OpenRouter returned {resp.status}: {text}")
+                    logger.error("OpenRouter returned status=%s", resp.status)
                     return None
 
                 data = await resp.json()

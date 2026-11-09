@@ -31,6 +31,7 @@ class OpenRouterProvider(AIProvider):
     ):
         self.config = config or Config()
         self.http_client = http_client
+        self._owns_http_client = http_client is None
         self.api_key = getattr(self.config, "openrouter_api_key", None) or os.getenv("OPENROUTER_API_KEY")
         self.model = getattr(self.config, "openrouter_model", "deepseek/deepseek-r1")
         self.endpoint = getattr(self.config, "openrouter_endpoint", "https://openrouter.ai/api/v1/chat/completions")
@@ -39,7 +40,7 @@ class OpenRouterProvider(AIProvider):
         self.reasoning_effort = str(getattr(self.config, "ai_reasoning_effort", "medium"))
 
     def is_configured(self) -> bool:
-        return bool(self.api_key and self.api_key.strip())
+        return self.config.external_ai_enabled and bool(self.api_key and self.api_key.strip())
 
     async def generate(
         self,
@@ -78,7 +79,7 @@ class OpenRouterProvider(AIProvider):
         client = self.http_client
         if client is None:
             client = httpx.AsyncClient(timeout=self.timeout)
-            should_close = True
+            self.http_client = client
 
         try:
             for attempt in range(1, 4):
@@ -251,3 +252,8 @@ class OpenRouterProvider(AIProvider):
 
     async def health_check(self) -> bool:
         return self.is_configured()
+
+    async def aclose(self):
+        if self._owns_http_client and self.http_client is not None:
+            await self.http_client.aclose()
+            self.http_client = None

@@ -261,6 +261,12 @@ class AdminCommands(commands.Cog):
         if mem:
             available = await mem.run_async(mem.persistence_available)
             embed.add_field(name="Memory storage", value="SQLite available" if available else "⚠️ Temporary fallback; writes pending", inline=False)
+        from services.orchestrator import RukiyaOrchestrator
+        if isinstance(orch, RukiyaOrchestrator):
+            brain = orch.brain.snapshot()
+            engine = orch.ai_engine
+            operations = dict(getattr(engine, 'provider_operations', {}))
+            embed.add_field(name="Brain", value=f"Active: {brain['active']} • Recent p95: {brain['p95_ms']} ms\nProvider operations: {operations}", inline=False)
         embed.add_field(name="Member welcomes", value="Enabled; also enable Server Members Intent in the Developer Portal" if self.bot.intents.members else "Disabled; set DISCORD_MEMBER_WELCOMES_ENABLED=true and enable the portal intent", inline=False)
         sync_error = getattr(self.bot, "command_sync_error", None)
         embed.add_field(name="Slash command sync", value=f"⚠️ {sync_error}" if sync_error else "✅ Last sync succeeded", inline=True)

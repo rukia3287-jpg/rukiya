@@ -1,5 +1,7 @@
 # 🗡️ Rukiya V2 — Discord & YouTube Livestream AI Bot
 
+Hybrid Brain and privacy controls: [Rukiya Brain update](RUKIYA_BRAIN_UPDATE.md). The existing pipeline now supports deterministic offline skills, optional loopback inference, scoped knowledge retrieval, opt-in history/fact extraction, and private self-service memory commands. See the report for configuration, actual benchmarks and remaining live-validation limits.
+
 Conversation behavior and verification: [Rukiya chat update](RUKIYA_CHAT_UPDATE.md).
 
 Current command, privacy, operator setup and validation details: [Rukiya update report](RUKIYA_UPDATE_REPORT.md).
@@ -185,7 +187,7 @@ Every cap is reserved with a check-and-increment that runs with no `await` betwe
 ## 💻 Local Development & Installation
 
 ### Prerequisites
-- Python 3.10+ (Python 3.11+ recommended)
+- Python 3.11+ (matches the existing CI and Render runtime; Brain deadlines use asyncio.timeout)
 - Git
 
 ### 1. Clone & Setup Environment

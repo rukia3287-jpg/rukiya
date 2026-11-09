@@ -23,8 +23,8 @@ class Executor:
         max_ai = int(getattr(self.config, "max_ai_concurrency", 3))
         max_search = int(getattr(self.config, "max_search_concurrency", 2))
 
-        self.ai_semaphore = asyncio.Semaphore(max_ai)
-        self.search_semaphore = asyncio.Semaphore(max_search)
+        self.ai_semaphore = asyncio.Semaphore(max(1, min(64, max_ai)))
+        self.search_semaphore = asyncio.Semaphore(max(1, min(16, max_search)))
 
         self.openrouter_timeout = float(getattr(self.config, "openrouter_timeout", 20.0))
         self.gemini_timeout = float(getattr(self.config, "gemini_timeout", 20.0))
@@ -43,6 +43,8 @@ class Executor:
         **kwargs: Any
     ) -> AIProviderResult:
         timeout = self.openrouter_timeout if provider.name == "openrouter" else self.gemini_timeout
+        if provider.name == 'local':
+            timeout = self.config.local_ai_timeout
         resolved_temperature = self.temperature if temperature is None else min(2.0, max(0.0, float(temperature)))
         resolved_max_tokens = self.max_completion_tokens if max_tokens is None else max(16, int(max_tokens))
         async with self.ai_semaphore:
