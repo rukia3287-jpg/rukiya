@@ -187,7 +187,7 @@ Every cap is reserved with a check-and-increment that runs with no `await` betwe
 ## 💻 Local Development & Installation
 
 ### Prerequisites
-- Python 3.10+ (Python 3.11+ recommended)
+- Python 3.11+ (matches the existing CI and Render runtime; Brain deadlines use asyncio.timeout)
 - Git
 
 ### 1. Clone & Setup Environment

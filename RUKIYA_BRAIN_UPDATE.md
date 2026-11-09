@@ -6,7 +6,7 @@ Implementation date: 9 November 2026. Repository: `rukia3287-jpg/rukiya`. Baseli
 
 Rukiya already had an orchestrator, stable platform identities, scoped Discord memory, public-stream context, deterministic eligibility/planning, separate OpenRouter/Gemini capabilities, daily budgets, search caches, safety/critic/repair stages, SQLite recovery, operator-only YouTube controls, and a substantial offline suite. The baseline suite passed **271 tests** before edits.
 
-The runtime is Python (CI: 3.11; `render.yaml`: 3.11.5), discord.py, aiohttp/httpx, SQLite, Google API/OAuth libraries and google-genai. Render's existing web-service configuration starts `main.py` and exposes `/health`. Its source declares the free plan and no persistent disk. That file does not prove durable filesystem storage or resources for inference. No dependencies or deployment framework were replaced.
+The Brain runtime requires Python 3.11+ because its whole-request deadlines use `asyncio.timeout`; this matches the existing CI (3.11) and `render.yaml` (3.11.5). The earlier README claim of Python 3.10 support has been corrected. The stack is discord.py, aiohttp/httpx, SQLite, Google API/OAuth libraries and google-genai. Render's existing web-service configuration starts `main.py` and exposes `/health`. Its source declares the free plan and no persistent disk. That file does not prove durable filesystem storage or resources for inference. No dependencies or deployment framework were replaced.
 
 Important dependencies, verified from source:
 
