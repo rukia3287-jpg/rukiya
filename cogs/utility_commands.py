@@ -114,7 +114,8 @@ class Utility(commands.Cog):
         )
 
         embed.add_field(name="🧠 Memory controls", value="`/memory_lookup` — Inspect current-context facts\n`/memory_reset` — Preview and confirm a fact reset\n`/rate_limit_status` — Inspect request budgets", inline=False)
-        embed.set_footer(text="YouTube posting, diagnostics and memory controls require the bot owner or OPERATOR_IDS. Chat, help and utilities are public.")
+        embed.add_field(name="Your Brain settings", value="`/my_memory` · `/remember` · `/forget_memory` · `/clear_my_memory`\n`/memory_preferences` — Choose history, automatic facts and external AI\n`/chat_style` · `/cancel_ai` · `/ai_feedback`\n`calculate 25*4` and `knowledge: <words>` work locally. `/knowledge_add` requires operator access.", inline=False)
+        embed.set_footer(text="Your Brain controls are private and self-owned. YouTube posting, diagnostics, operator memory tools and knowledge publishing require the bot owner or OPERATOR_IDS.")
         view = HelpView(interaction.user.id, embed)
         await send_response(interaction, embed=embed, view=view, ephemeral=True)
         await view.bind(interaction)

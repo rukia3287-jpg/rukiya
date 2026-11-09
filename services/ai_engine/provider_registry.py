@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from services.ai_engine.providers.base import AIProvider
 from services.ai_engine.providers.gemini import GeminiProvider
 from services.ai_engine.providers.openrouter import OpenRouterProvider
+from services.ai_engine.providers.local import LocalProvider
 from services.config import Config
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ class ProviderRegistry:
     def _initialize_default_providers(self) -> None:
         self.register(OpenRouterProvider(self.config))
         self.register(GeminiProvider(self.config))
+        if self.config.local_ai_enabled:
+            self.register(LocalProvider(self.config))
 
     def register(self, provider: AIProvider) -> None:
         self._providers[provider.name] = provider

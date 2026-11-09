@@ -119,6 +119,8 @@ class AIService:
     # ─────────────────────────────────────────────────────────────
     async def _call_openrouter(self, messages_or_prompt: Any, author: str = "viewer", max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> Optional[str]:
         """Low-level OpenRouter call with exponential backoff."""
+        if not self.config.external_ai_enabled:
+            return None
         if not self.openrouter_key:
             return None
 
@@ -180,13 +182,13 @@ class AIService:
                     return None
 
                 if resp.status_code >= 400:
-                    logger.error("OpenRouter HTTP %d: %s", resp.status_code, resp.text[:500])
+                    logger.error("OpenRouter HTTP %d", resp.status_code)
                     return None
 
                 try:
                     j = resp.json()
                 except Exception:
-                    logger.error("OpenRouter non-JSON response: %s", resp.text[:200])
+                    logger.error("OpenRouter returned a non-JSON response")
                     return None
 
                 choices = j.get("choices") or []
@@ -199,7 +201,7 @@ class AIService:
                 if isinstance(j.get("text"), str) and j["text"].strip():
                     return j["text"].strip()
 
-                logger.warning("OpenRouter returned no usable text: %s", j)
+                logger.warning("OpenRouter returned no usable text")
                 return None
         finally:
             if should_close:

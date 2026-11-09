@@ -666,6 +666,7 @@ class GeminiProvider(AIProvider):
         client: Optional[Any] = None
     ):
         self.config = config or Config()
+        self._owns_client = client is None
         api_key = getattr(self.config, "gemini_api_key", None) or os.getenv("GEMINI_API_KEY")
         model = getattr(self.config, "gemini_model", None) or os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
         self.timeout = float(getattr(self.config, "gemini_timeout", 20.0))
@@ -690,8 +691,18 @@ class GeminiProvider(AIProvider):
         """Synchronize provider capability with central health tracker."""
         self._health_tracker = tracker
 
+    async def aclose(self):
+        client = self.client_manager._client
+        if self._owns_client and client is not None:
+            aio = getattr(client, 'aio', None)
+            if aio is not None and hasattr(aio, 'aclose'):
+                await aio.aclose()
+            if hasattr(client, 'close'):
+                await asyncio.to_thread(client.close)
+            self.client_manager._client = None
+
     def is_configured(self) -> bool:
-        return self.client_manager.health_check()
+        return self.config.external_ai_enabled and self.client_manager.health_check()
 
     def is_generation_available(self) -> bool:
         if not self.is_configured():
@@ -724,6 +735,8 @@ class GeminiProvider(AIProvider):
         temperature: float = 0.85,
         **kwargs: Any
     ) -> AIProviderResult:
+        if not self.config.external_ai_enabled:
+            return AIProviderResult('', self.name, error='External inference disabled')
         system_instruction = None
         user_parts: List[str] = []
         for m in messages:
@@ -759,6 +772,8 @@ class GeminiProvider(AIProvider):
         max_tokens: int = 250,
         **kwargs: Any
     ) -> AIProviderResult:
+        if not self.config.external_ai_enabled:
+            return AIProviderResult('', self.name, error='External search disabled')
         res = await self.search_engine.search(
             query=query,
             system_instruction=system_instruction,

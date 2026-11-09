@@ -1,0 +1,32 @@
+{
+  "python": "3.12.14",
+  "platform": "Linux",
+  "planning": {
+    "n": 1000,
+    "median_ms": 0.062,
+    "p95_ms": 0.1266
+  },
+  "memory_lookup": {
+    "n": 100,
+    "median_ms": 0.3463,
+    "p95_ms": 0.5327
+  },
+  "retrieval_100_documents": {
+    "n": 50,
+    "median_ms": 5.9934,
+    "p95_ms": 7.3554
+  },
+  "deterministic_full_pipeline": {
+    "n": 100,
+    "median_ms": 3.2151,
+    "p95_ms": 4.7046
+  },
+  "provider_operations": {},
+  "deterministic_error_rate": 0.0,
+  "deterministic_cache_hit_rate": 0.99,
+  "fts5_available": true,
+  "process_peak_rss_kib": 32528,
+  "first_token_ms": null,
+  "real_model_latency_ms": null,
+  "notes": "Sequential offline synthetic run; includes orchestrator identity, policy, SQLite and safety; no model loaded, no platform transports."
+}

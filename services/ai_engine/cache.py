@@ -156,6 +156,12 @@ class SearchResultCache:
         self._entries.clear()
         self._negative_entries.clear()
 
+    def clear_partition(self, partition: str) -> None:
+        for entries in (self._entries, self._negative_entries):
+            for key in list(entries):
+                if partition in key:
+                    entries.pop(key, None)
+
     def size(self) -> int:
         return len(self._entries)
 
@@ -179,16 +185,24 @@ class InFlightDeduplicator:
         async with self._lock:
             existing_task = self._in_flight.get(norm_key)
             if existing_task and not existing_task.done():
-                logger.debug("Joining existing in-flight search task for key: '%s'", norm_key)
+                logger.debug("Joining an existing in-flight search")
                 task_to_await = existing_task
             else:
+                if len(self._in_flight) >= 128:
+                    raise RuntimeError('Search capacity exhausted')
                 task_to_await = asyncio.create_task(factory())
                 self._in_flight[norm_key] = task_to_await
+                def completed(task):
+                    if self._in_flight.get(norm_key) is task:
+                        self._in_flight.pop(norm_key, None)
+                    if not task.cancelled():
+                        task.exception()  # consume failures even if every waiter left
+                task_to_await.add_done_callback(completed)
 
         try:
-            return await task_to_await
+            return await asyncio.shield(task_to_await)
         except asyncio.CancelledError:
-            logger.debug("In-flight task cancelled for key: '%s'", norm_key)
+            logger.debug("In-flight search waiter cancelled")
             raise
         finally:
             async with self._lock:
@@ -202,6 +216,15 @@ class InFlightDeduplicator:
             for t in tasks:
                 t.cancel()
             self._in_flight.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def cancel_partition(self, partition):
+        tasks = [task for key, task in self._in_flight.items() if key.startswith(partition)]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def active_count(self) -> int:

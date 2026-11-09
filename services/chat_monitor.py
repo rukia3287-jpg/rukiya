@@ -324,7 +324,7 @@ class ChatMonitor:
         idle_msg = random.choice(self._idle_chat_messages)
         if await self.send_chat_message(idle_msg, message_kind="idle"):
             self._last_idle_message_at = time.monotonic()
-            logger.info("Idle chat message sent: '%s'", idle_msg)
+            logger.info("Idle chat message sent chars=%d", len(idle_msg))
 
     async def _monitor_loop(self) -> None:
         retries = 0

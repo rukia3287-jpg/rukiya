@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import os
+import math
 from dataclasses import dataclass, field
 from typing import Set, Optional
 
@@ -75,6 +76,24 @@ class Config:
     rate_limit_idle_capacity: int = 1
     rate_limit_discord_capacity: int = 5
     idle_chat_enabled: bool = True
+
+    # Brain admission, optional loopback inference and privacy defaults.
+    external_ai_enabled: bool = True
+    local_ai_enabled: bool = False
+    local_ai_url: str = "http://127.0.0.1:11434/v1"
+    local_ai_model: str = ""
+    local_ai_timeout: float = 15.0
+    brain_timeout: float = 45.0
+    brain_max_active: int = 8
+    brain_guild_active: int = 3
+    brain_user_active: int = 2
+    brain_prompt_chars: int = 4000
+    brain_context_chars: int = 24000
+    brain_session_ttl: float = 900.0
+    brain_session_count: int = 256
+    memory_auto_extract: bool = False
+    memory_history_enabled: bool = False
+    memory_retention_days: float = 90.0
 
     # Sets for filtering and triggers
     bot_users: Set[str] = field(default_factory=set)
@@ -204,6 +223,28 @@ class Config:
         if idle_enabled_env is not None:
             self.idle_chat_enabled = idle_enabled_env.lower() in ("1", "true", "yes")
 
+        for attr, env in (("external_ai_enabled", "EXTERNAL_AI_ENABLED"),
+                          ("local_ai_enabled", "LOCAL_AI_ENABLED"),
+                          ("memory_auto_extract", "MEMORY_AUTO_EXTRACT"),
+                          ("memory_history_enabled", "MEMORY_HISTORY_ENABLED")):
+            if env in os.environ:
+                setattr(self, attr, os.environ[env].strip().lower() in {"1", "true", "yes", "on"})
+        self.local_ai_url = os.getenv("LOCAL_AI_URL", self.local_ai_url).strip()
+        self.local_ai_model = os.getenv("LOCAL_AI_MODEL", self.local_ai_model).strip()
+        for attr, env, low, high, cast in (
+            ("local_ai_timeout", "LOCAL_AI_TIMEOUT", 1, 60, float),
+            ("brain_timeout", "BRAIN_TIMEOUT", 1, 180, float),
+            ("brain_max_active", "BRAIN_MAX_ACTIVE", 1, 64, int),
+            ("brain_guild_active", "BRAIN_GUILD_ACTIVE", 1, 16, int),
+            ("brain_user_active", "BRAIN_USER_ACTIVE", 1, 4, int),
+            ("brain_prompt_chars", "BRAIN_PROMPT_CHARS", 100, 8000, int),
+            ("brain_context_chars", "BRAIN_CONTEXT_CHARS", 12000, 48000, int),
+            ("brain_session_ttl", "BRAIN_SESSION_TTL", 60, 86400, float),
+            ("brain_session_count", "BRAIN_SESSION_COUNT", 1, 5000, int),
+            ("memory_retention_days", "MEMORY_RETENTION_DAYS", 1, 365, float),
+        ):
+            setattr(self, attr, max(low, min(high, self._env_number(env, getattr(self, attr), cast))))
+
     @staticmethod
     def _env_number(name: str, current, cast):
         """Read one numeric env var; an invalid value keeps the default and is reported."""
@@ -211,7 +252,10 @@ class Config:
         if raw is None:
             return current
         try:
-            return cast(raw)
+            value = cast(raw)
+            if not math.isfinite(value):
+                raise ValueError("nonfinite")
+            return value
         except ValueError:
             # Report the variable, not its value, in case a secret was pasted into it.
             logger.warning("Ignoring invalid %s value for %s; keeping %r", cast.__name__, name, current)

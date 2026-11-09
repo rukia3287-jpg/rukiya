@@ -130,6 +130,9 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response)
 
     async def test_facts_extracted_and_stored_in_pipeline(self):
+        # Automatic extraction now requires an explicit viewer preference.
+        self.memory.set_brain_preferences('youtube:UC_fan', history_enabled=False,
+                                          auto_memory=True, external_allowed=True)
         msg = ChatMessage(
             platform="youtube",
             message_id="msg_4",

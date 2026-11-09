@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from services.ai_engine.models import AIEngineRequest, EvidenceItem, Plan
 from services.config import Config
 from services.safety_service import SERIOUS_INTENT_INSTRUCTIONS
+from services.brain import response_style
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +70,10 @@ class ContextCompiler:
                 k = getattr(m, "key", "") if not isinstance(m, dict) else m.get("key", "")
                 v = getattr(m, "value", "") if not isinstance(m, dict) else m.get("value", "")
                 c = getattr(m, "confidence", 0.9) if not isinstance(m, dict) else m.get("confidence", 0.9)
+                k, v = str(k)[:64], str(v)[:1000]
                 score = self.score_memory(k, v, c, request.text)
                 if score >= 0.35:
-                    scored_mems.append((score, f"- {k}: {v}"))
+                    scored_mems.append((score, '- ' + json.dumps({k: v}, ensure_ascii=False).replace('<', '\\u003c').replace('>', '\\u003e')))
             scored_mems.sort(key=lambda x: x[0], reverse=True)
             if scored_mems:
                 mem_lines = [line for _, line in scored_mems[:8]]
@@ -84,7 +87,7 @@ class ContextCompiler:
             for sm in request.stream_memory[:8]:
                 k = getattr(sm, "key", "") if not isinstance(sm, dict) else sm.get("key", "")
                 v = getattr(sm, "value", "") if not isinstance(sm, dict) else sm.get("value", "")
-                stream_lines.append(f"- (session) {k}: {v}")
+                stream_lines.append('- (session) ' + json.dumps({str(k)[:64]: str(v)[:1000]}, ensure_ascii=False).replace('<', '\\u003c').replace('>', '\\u003e'))
             if stream_lines:
                 context_blocks.append(
                     "<stream_context>\n" + "\n".join(stream_lines) + "\n</stream_context>"
@@ -163,15 +166,22 @@ class ContextCompiler:
         )
 
         prompt_instruction += "\n" + turn_guidance(request.text, bool(request.recent_messages), bool(request.reply_to_text))
+        prompt_instruction += "\nRESPONSE STYLE: " + response_style(request)
 
         if repair_instruction:
             prompt_instruction += f"\nCORRECTION REQUIRED: {repair_instruction}"
 
         # 6. Current User Turn
         context_str = "\n\n".join(context_blocks) + "\n\n" if context_blocks else ""
+        # Drop whole optional context blocks before ever truncating policy/current turn.
+        fixed_cost = len(messages[0]['content']) + len(request.text) + len(prompt_instruction) + len(request.author) + 200
+        allowance = max(0, self.config.brain_context_chars - fixed_cost)
+        while context_blocks and len('\n\n'.join(context_blocks)) > allowance:
+            context_blocks.pop(0)
+        context_str = "\n\n".join(context_blocks) + "\n\n" if context_blocks else ""
         current_content = (
             f"{context_str}<user_message>\n"
-            f"[Stream viewer '{request.author}' says]: {request.text}\n"
+            + json.dumps({'viewer': request.author[:80], 'text': request.text}, ensure_ascii=False).replace('<', '\\u003c').replace('>', '\\u003e') + '\n'
             f"</user_message>\n\n"
             f"{prompt_instruction}"
         )

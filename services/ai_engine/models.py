@@ -13,6 +13,8 @@ from services.ai_engine.errors import ErrorCategory, ProviderError
 
 
 class RouteType(str, Enum):
+    DETERMINISTIC = "deterministic"
+    LOCAL = "local"
     OPENROUTER_DIRECT = "openrouter_direct"
     GEMINI_DIRECT = "gemini_direct"
     GEMINI_SEARCH = "gemini_search"
@@ -161,6 +163,9 @@ class AIEngineRequest:
     recent_messages: Optional[List[Dict[str, Any]]] = None
     request_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     reply_to_text: Optional[str] = None
+    allow_external: bool = True
+    style: str = "adaptive"
+    conversation_scope: str = ""
 
 
 @dataclass

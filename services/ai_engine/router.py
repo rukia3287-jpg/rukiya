@@ -28,6 +28,14 @@ class Router:
         budget: BudgetManager,
         registry: Optional[object] = None,
     ) -> RouteType:
+        local = registry.get('local') if registry else None
+        external = self.config.external_ai_enabled and request.allow_external
+        if (local and local.is_configured() and not plan.search_required
+                and health.is_available('local', capability='generation')
+                and (plan.complexity < .65 or not external)):
+            return RouteType.LOCAL
+        if not external:
+            return RouteType.STATIC_FALLBACK
         # Provider configuration and capability availability are separate concerns.
         # When a registry is supplied, an unconfigured/missing provider is never routed to.
         openrouter_provider = registry.get("openrouter") if registry and hasattr(registry, "get") else None
@@ -81,6 +89,8 @@ class Router:
         # ─── HARD OVERRIDES ──────────────────────────────────────
         # 1. Total Outage
         if not or_avail and not gem_avail:
+            if local and local.is_configured() and not plan.search_required and health.is_available('local', capability='generation'):
+                return RouteType.LOCAL
             logger.warning("Both providers unavailable; routing to STATIC_FALLBACK.")
             return RouteType.STATIC_FALLBACK
 

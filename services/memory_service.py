@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from services.config import Config
 from services.models import MemoryEntry, StreamSession, UserIdentity
+from services.brain_memory import BrainMemoryMixin
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def serialized_memory(function):
     return wrapped
 
 
-class MemoryService:
+class MemoryService(BrainMemoryMixin):
     """Manages stream and persistent user memories with SQLite and resilient fallback."""
 
     # While in fallback, SQLite is retried at most this often. On recovery, exactly what
@@ -76,6 +77,10 @@ class MemoryService:
         self._pending_link_deletes: set = set()  # secondary ids to delete
 
         self.active_session_id: Optional[str] = None
+        self._brain_preferences = {}
+        self._pending_brain_preferences = set()
+        self._pending_brain_deletes = {}
+        self.brain_fts = False
         self._init_db()
 
     def _session_id(self, explicit=None):
@@ -162,6 +167,7 @@ class MemoryService:
         try:
             with conn:
                 # 1. Deletions first, so later writes are not removed again.
+                self._replay_brain_state(conn)
                 for secondary_id in sorted(self._pending_link_deletes):
                     run("DELETE FROM identity_links WHERE secondary_id=?", (secondary_id,), "identity link removal")
                 for canonical_id, reset_at in self._pending_memory_resets.items():
@@ -256,6 +262,8 @@ class MemoryService:
         self._pending_stream_facts.clear()
         self._pending_links.clear()
         self._pending_link_deletes.clear()
+        self._pending_brain_preferences.clear()
+        self._pending_brain_deletes.clear()
         return True
 
     def _open_connection(self) -> Optional[sqlite3.Connection]:
@@ -355,6 +363,8 @@ class MemoryService:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_stream_memory_session ON stream_memory(session_id, expires_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_recent_session ON recent_messages(session_id, timestamp)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_recent_age ON recent_messages(timestamp)")
+                self._init_brain_tables(conn)
             logger.info("MemoryService SQLite tables initialized at %s", self.db_path)
         except Exception as e:
             logger.warning("Failed to initialize SQLite database (%s); switching to in-memory fallback", e)
@@ -585,6 +595,7 @@ class MemoryService:
         role: str = "user",
         session_id: Optional[str] = None,
         timestamp: Optional[float] = None,
+        persist: bool = True,
     ) -> None:
         now = time.time()
         if role == "user":
@@ -605,12 +616,18 @@ class MemoryService:
             "canonical_id": user.canonical_id,
             "role": role,
             "author": user.display_name,
-            "text": text,
+            "text": text[:800],
             "timestamp": now
         }
         self._in_memory_recent_messages.setdefault(sid, []).append(msg_record)
         if len(self._in_memory_recent_messages[sid]) > self.max_context_messages * 2:
             self._in_memory_recent_messages[sid] = self._in_memory_recent_messages[sid][-self.max_context_messages:]
+        if len(self._in_memory_recent_messages) > self.config.brain_session_count:
+            oldest = min(self._in_memory_recent_messages, key=lambda scope: self._in_memory_recent_messages[scope][-1]['timestamp'] if self._in_memory_recent_messages[scope] else 0)
+            self._in_memory_recent_messages.pop(oldest, None)
+
+        if not persist:
+            return
 
         conn = self._get_connection()
         if conn:
@@ -619,7 +636,8 @@ class MemoryService:
                     conn.execute("""
                         INSERT INTO recent_messages (session_id, canonical_id, role, author, text, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, (sid, user.canonical_id, role, user.display_name, text, now))
+                    """, (sid, user.canonical_id, role, user.display_name, text[:800], now))
+                    conn.execute("DELETE FROM recent_messages WHERE timestamp<=?", (now-self.config.brain_session_ttl,))
                     # Prune old messages for this session
                     conn.execute("""
                         DELETE FROM recent_messages WHERE id NOT IN (
@@ -645,6 +663,7 @@ class MemoryService:
     @serialized_memory
     def set_user_memory(self, canonical_id: str, key: str, value: str, confidence: float = 0.9, source: str = "explicit_statement") -> MemoryEntry:
         now = time.time()
+        key, value = str(key).strip().lower()[:64], str(value).strip()[:1000]
         user_memories = self._in_memory_memories.setdefault(canonical_id, {})
         entry = user_memories.get(key)
 
@@ -718,8 +737,12 @@ class MemoryService:
         memories: List[MemoryEntry] = []
         conn = self._get_connection()
         if not conn:
-            return list(self._in_memory_memories.get(canonical_id, {}).values())
+            cutoff = time.time() - self.config.memory_retention_days * 86400
+            return [entry for entry in self._in_memory_memories.get(canonical_id, {}).values() if entry.updated_at > cutoff]
         try:
+            cutoff = time.time() - self.config.memory_retention_days * 86400
+            conn.execute("DELETE FROM memories WHERE updated_at<?", (cutoff,))
+            conn.commit()
             rows = conn.execute("SELECT * FROM memories WHERE canonical_id=? ORDER BY updated_at DESC", (canonical_id,)).fetchall()
             for r in rows:
                 entry = MemoryEntry(
@@ -909,12 +932,16 @@ class MemoryService:
             conn.close()
 
     @serialized_memory
-    def get_recent_messages(self, session_id: Optional[str] = None, limit: int = 8) -> List[Dict[str, Any]]:
+    def get_recent_messages(self, session_id: Optional[str] = None, limit: int = 8, allow_persisted: bool = True) -> List[Dict[str, Any]]:
         """Retrieve recent conversation history for prompt context."""
         sid = self._session_id(session_id)
-        in_mem = self._in_memory_recent_messages.get(sid, [])
+        cutoff = time.time() - self.config.brain_session_ttl
+        in_mem = [row for row in self._in_memory_recent_messages.get(sid, []) if row['timestamp'] > cutoff]
+        self._in_memory_recent_messages[sid] = in_mem
         if in_mem:
             return in_mem[-limit:]
+        if not allow_persisted:
+            return []
 
         conn = self._get_connection()
         if not conn:
@@ -922,8 +949,8 @@ class MemoryService:
         try:
             rows = conn.execute("""
                 SELECT canonical_id, role, author, text, timestamp FROM recent_messages
-                WHERE session_id=? ORDER BY timestamp DESC LIMIT ?
-            """, (sid, limit)).fetchall()
+                WHERE session_id=? AND timestamp>? ORDER BY timestamp DESC LIMIT ?
+            """, (sid, cutoff, limit)).fetchall()
             return [{"canonical_id": r["canonical_id"], "role": r["role"], "author": r["author"], "text": r["text"], "timestamp": float(r["timestamp"])} for r in reversed(rows)]
         except Exception as e:
             logger.error("Error retrieving recent messages: %s", e)
