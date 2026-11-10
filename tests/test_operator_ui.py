@@ -93,9 +93,14 @@ class OperatorUITests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(discord.app_commands.CheckFailure):
                     await command.checks[0](event)
                 await command.callback(cog, event, **kwargs)
-                event.response.send_message.assert_awaited_once()
-                event.response.defer.assert_not_awaited()
-                event.edit_original_response.assert_not_awaited()
+                if name == 'start_monitoring':
+                    # Start must acknowledge before its new asynchronous role lookup.
+                    event.response.defer.assert_awaited_once()
+                    event.edit_original_response.assert_awaited_once()
+                else:
+                    event.response.send_message.assert_awaited_once()
+                    event.response.defer.assert_not_awaited()
+                    event.edit_original_response.assert_not_awaited()
 
     async def test_explicit_operator_and_application_owner_are_allowed(self):
         event = interaction(self.bot)
