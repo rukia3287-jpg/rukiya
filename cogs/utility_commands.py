@@ -82,7 +82,8 @@ class Utility(commands.Cog):
         embed.add_field(
             name="🔴 YouTube Live Chat",
             value=(
-                "`/start <video_id>` — Start monitoring YouTube live chat\n"
+                "`/start <video_id>` — Start YouTube chat (operator or approved server role)\n"
+                "`/youtube_roles add|remove|list` — Operators: manage allowed start roles\n"
                 "`/stop` — Stop monitoring YouTube chat\n"
                 "`/yt_status` — View YouTube chat monitor status\n"
                 "`/say <text>` — Send a message to YouTube live chat\n"

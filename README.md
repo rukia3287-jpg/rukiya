@@ -325,7 +325,7 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 | `/say <text>` | Bot owner/operator | Send a raw message directly to active YouTube live chat |
 | `/auto_reply [action]` | Bot owner/operator | Check status, enable, or disable YouTube auto-responder |
 | `/rukiya_info` | Everyone | View Rukiya's character profile and system settings |
-| `/start <video_id>` | Bot owner/operator | Start monitoring YouTube live chat for a livestream |
+| `/start <video_id>` | Bot owner/operator or configured server role | Start monitoring YouTube live chat for a livestream |
 | `/stop` | Bot owner/operator | Stop monitoring YouTube live chat |
 | `/yt_status` | Bot owner/operator | Check live status of YouTube chat monitor |
 | `/ping` | Everyone | Check bot websocket latency |
@@ -380,4 +380,21 @@ The bot is fully configured for deployment on [Render](https://render.com) using
 - Live Discord/YouTube behavior is verified by unit tests with stubs, not by an automated end-to-end run against real platforms.
 
 
-> Permission note: `/ask` is available to everyone, but `post_to_yt=true`, `/say`, `/start`, `/stop`, and `/auto_reply` require the bot application owner or a user in `OPERATOR_IDS`; a server administrator alone is insufficient.
+> Permission note: `/start` also accepts explicitly configured Discord roles in the invoking server. The owner/operators manage those roles with `/youtube_roles add|remove|list`. `post_to_yt=true`, `/say`, `/stop`, and `/auto_reply` still require the bot application owner or a user in `OPERATOR_IDS`; server administrator permission alone does not grant account control.
+
+### Delegate YouTube start to Discord roles
+
+After deploying this feature and allowing slash-command sync to finish:
+
+1. As the bot application owner or an `OPERATOR_IDS` user, run `/youtube_roles add role:@YouTube` in your server. Repeat to allow more roles.
+2. Give a member one of those roles through Discord's normal role controls.
+3. That member can run `/start video_id:abc123_-XYZ` with the stream's actual **11-character video ID** (the value after `watch?v=`). The stream must be live with live chat enabled.
+4. Use `/youtube_roles list` to view configured roles, or `/youtube_roles remove role:@YouTube` to revoke that role. Removing one role does not revoke a member who still has another allowed role.
+
+Only the owner/operators configure role delegation. Roles grant **start access only** in their configured server; they do not grant `/stop`, `/say`, `/auto_reply`, admin diagnostics, or role-management access. The owner/operators retain their previous access, including from DMs; role-based access requires a server interaction. Using a role such as `@everyone` grants that server's members start access, so choose the role you intend.
+
+Role IDs are stored in an additive `youtube_start_roles` table in the existing `DB_PATH` SQLite database. They survive process restarts when that database is retained; ephemeral hosting still needs persistent storage to survive redeployment. No new database, API key, member intent or environment variable is required. Database failures deny role-based access rather than trusting a memory fallback.
+
+The bot still has **one shared active YouTube monitor/account**. A new `/start` cannot replace an active stream; an operator must stop it first. Startup is private, acknowledges before asynchronous checks, and rechecks the stored grant plus freshly fetched Discord membership before starting. Removing a role does not stop an already-running stream. OAuth and YouTube posting permissions still come from the bot's configured account, not the Discord member's account. Existing auto-reply settings still apply.
+
+Verification: the baseline 271 tests passed. The updated suite passes **291 tests**, including 20 focused role/start tests for restart persistence, multiple roles, guild/DM isolation, direct callback protection, delegation boundaries, revoked grants/membership, database failures, invalid video IDs, auth/live-chat failures, concurrent starts and cancellation. Tests use mocked Discord and YouTube; live platform behavior needs a test-server check after deployment.
